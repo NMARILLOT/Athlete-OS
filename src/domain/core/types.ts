@@ -188,13 +188,39 @@ export const STIMULUS_KEY_VALUES = [
   "threshold",
   "vo2max",
   "power",
-  "crossfit_conditioning",
+  /** Any CrossFit class exposure (skill, strength piece, metcon), whatever its intensity. */
+  "crossfit_exposure",
+  /** High-intensity conditioning (hard metcons, intervals on ergs) — counts in the hard budget. */
+  "hi_conditioning",
   "mobility_recovery",
 ] as const;
 export type StimulusKey = (typeof STIMULUS_KEY_VALUES)[number];
 
 /** 1.0 = one standard exposure of that stimulus. */
 export type StimulusCredits = Partial<Record<StimulusKey, number>>;
+
+/** Stimulus keys whose exposure counts as a "hard" session for the weekly hard-session budget. */
+export const HARD_STIMULUS_KEYS: readonly StimulusKey[] = ["hi_conditioning", "threshold", "vo2max"];
+
+/**
+ * Window over which each stimulus target is counted (days). Low-frequency stimuli are counted over
+ * two weeks so that "threshold this week, VO2 next week" is a valid pattern; tests over six weeks.
+ */
+export const STIMULUS_WINDOW_DAYS: Record<StimulusKey, number> = {
+  strength_lower: 7,
+  strength_upper: 7,
+  hypertrophy: 7,
+  olympic_technique: 7,
+  gymnastics_skill: 7,
+  aerobic_easy: 7,
+  aerobic_long: 7,
+  threshold: 14,
+  vo2max: 14,
+  power: 14,
+  crossfit_exposure: 7,
+  hi_conditioning: 7,
+  mobility_recovery: 7,
+};
 
 export const LOAD_DIMENSION_VALUES = [
   "cardiovascular",
