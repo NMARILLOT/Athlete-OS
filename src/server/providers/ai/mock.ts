@@ -112,6 +112,7 @@ export function heuristicIntent(text: string, today: string, tomorrow: string): 
   else if (/\b(juste bouger|just move|bouger un peu)\b/.test(t)) kind = "just_move";
   else if (/\b(j'?ai du temps|have time|libre)\b/.test(t)) kind = "have_time";
   else if (/\b(surprise|surprends)\b/.test(t)) kind = "surprise";
+  if (kind === "custom" && availableMinutes) kind = "have_time";
   if (!INTENT_KIND_VALUES.includes(kind)) kind = "custom";
   return { kind, intensity, availableMinutes, rawText: text.slice(0, 200), date };
 }

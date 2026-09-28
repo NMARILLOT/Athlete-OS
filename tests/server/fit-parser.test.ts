@@ -3,6 +3,8 @@ vi.mock("server-only", () => ({}));
 import { Encoder, Profile } from "@garmin/fitsdk";
 
 const N = Profile.MesgNum as Record<string, number>;
+type AnyMesg = Parameters<Encoder["onMesg"]>[1];
+const asMesg = (m: Record<string, unknown>): AnyMesg => m as unknown as AnyMesg;
 const FILE_ID = N.FILE_ID as number;
 const RECORD = N.RECORD as number;
 const LAP = N.LAP as number;
@@ -13,13 +15,16 @@ import { parseFit } from "@/server/fit/parser";
 function buildRunFit(options: { withDynamics?: boolean; withHr?: boolean } = {}): Uint8Array {
   const enc = new Encoder();
   const start = new Date("2026-09-29T07:15:00Z");
-  enc.onMesg(FILE_ID, {
-    type: "activity",
-    manufacturer: "garmin",
-    product: 4315,
-    serialNumber: 3421009876,
-    timeCreated: start,
-  });
+  enc.onMesg(
+    FILE_ID,
+    asMesg({
+      type: "activity",
+      manufacturer: "garmin",
+      product: 4315,
+      serialNumber: 3421009876,
+      timeCreated: start,
+    }),
+  );
   for (let i = 0; i <= 600; i += 5) {
     const r: Record<string, unknown> = {
       timestamp: new Date(start.getTime() + i * 1000),
@@ -31,20 +36,23 @@ function buildRunFit(options: { withDynamics?: boolean; withHr?: boolean } = {})
     if (options.withHr !== false && i >= 10) r.heartRate = 140 + Math.round(5 * Math.sin(i / 60));
     if (options.withDynamics)
       Object.assign(r, { stanceTime: 245, verticalOscillation: 82, stepLength: 1150 });
-    enc.onMesg(RECORD, r);
+    enc.onMesg(RECORD, asMesg(r));
   }
   const end = new Date(start.getTime() + 600_000);
-  enc.onMesg(LAP, {
-    timestamp: end,
-    startTime: start,
-    totalElapsedTime: 600,
-    totalTimerTime: 600,
-    totalDistance: 1860,
-    avgHeartRate: 141,
-    maxHeartRate: 148,
-    avgSpeed: 3.1,
-    avgCadence: 86,
-  });
+  enc.onMesg(
+    LAP,
+    asMesg({
+      timestamp: end,
+      startTime: start,
+      totalElapsedTime: 600,
+      totalTimerTime: 600,
+      totalDistance: 1860,
+      avgHeartRate: 141,
+      maxHeartRate: 148,
+      avgSpeed: 3.1,
+      avgCadence: 86,
+    }),
+  );
   const session: Record<string, unknown> = {
     timestamp: end,
     startTime: start,
@@ -67,14 +75,17 @@ function buildRunFit(options: { withDynamics?: boolean; withHr?: boolean } = {})
       avgStepLength: 1150,
       avgVerticalRatio: 7.1,
     });
-  enc.onMesg(SESSION, session);
-  enc.onMesg(ACTIVITY, {
-    timestamp: end,
-    numSessions: 1,
-    type: "manual",
-    event: "activity",
-    eventType: "stop",
-  });
+  enc.onMesg(SESSION, asMesg(session));
+  enc.onMesg(
+    ACTIVITY,
+    asMesg({
+      timestamp: end,
+      numSessions: 1,
+      type: "manual",
+      event: "activity",
+      eventType: "stop",
+    }),
+  );
   return enc.close();
 }
 
