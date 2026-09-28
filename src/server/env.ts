@@ -21,7 +21,7 @@ const EnvSchema = z
     ALLOWED_EMAILS: z.string().optional(),
     AI_PROVIDER: z.enum(["anthropic", "mock"]).default("mock"),
     ANTHROPIC_API_KEY: z.string().optional(),
-    AI_MODEL_PARSER: z.string().default("claude-sonnet-5-5"),
+    AI_MODEL_PARSER: z.string().default("claude-opus-5-5"),
     AI_MODEL_COACH: z.string().default("claude-opus-5-5"),
     GARMIN_PROVIDER: z.enum(["mock", "official"]).default("mock"),
     GARMIN_CLIENT_ID: z.string().optional(),

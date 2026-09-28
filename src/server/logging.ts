@@ -30,7 +30,8 @@ function emit(level: Level, event: string, fields: LogFields = {}): void {
   const line = JSON.stringify({ ts: new Date().toISOString(), level, event, ...fields });
   if (level === "error") console.error(line);
   else if (level === "warn") console.warn(line);
-  else if (process.env.NODE_ENV !== "production" || level !== "debug") console.log(line);
+  else if (process.env.NODE_ENV !== "production" || level !== "debug")
+    process.stdout.write(`${line}\n`);
 }
 
 export const log = {

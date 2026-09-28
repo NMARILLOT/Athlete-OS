@@ -4,7 +4,7 @@ export default function InboxPage() {
   return (
     <section className="py-6">
       <h1 className="text-3xl font-semibold tracking-tight">Inbox</h1>
-      <p className="text-fg-muted mt-2">Bientôt.</p>
+      <p className="mt-2 text-fg-muted">Bientôt.</p>
     </section>
   );
 }
