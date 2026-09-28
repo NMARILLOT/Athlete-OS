@@ -58,5 +58,5 @@ export function userOwnedTable<
   ) => PgTableExtraConfigValue[],
 ) {
   const merged: OwnedColumns & TColumns = { ...ownedColumns(), ...columns };
-  return pgTable(name, merged, extra).enableRLS();
+  return pgTable<TName, OwnedColumns & TColumns>(name, merged, extra).enableRLS();
 }
