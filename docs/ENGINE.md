@@ -1,162 +1,247 @@
-# Athlete OS — Adaptive engine (Layer A) and AI (Layer B)
+# Athlete OS — Adaptive engine (Layer A) and AI (Layer B) — v2
 
-## 0. Contract
+> v2 integrates the adversarial architecture review (scoring normalisation, hard-budget definition, unknown-WOD
+> class handling, bonus gating, confidence model, week projection). Constants live in code:
+> `src/domain/athlete-model/defaults.ts` is the single source of numeric defaults; this document explains them.
+
+## 0. Contract (pure, deterministic, versioned)
 
 ```ts
-runEngine(input: EngineInput): Recommendation   // pure, deterministic, versioned (ENGINE_VERSION = "1.x")
+runEngine(input: EngineInput): Recommendation            // one day
+projectWeek(input: EngineInput, days = 7): DayOutlook[]  // fold runEngine day by day, primaries appended to a simulated history
+checkPlacement(input: EngineInput, session: LoadProfile, targetDate): PlacementVerdict  // "this session on that date?"
 ```
 
 The engine never reads the database or the clock; the service layer assembles `EngineInput` and passes `now`.
-Everything it decides is reproducible from the persisted `inputs_snapshot`.
+Everything it decides is reproducible from the persisted `inputs_snapshot`. `ENGINE_VERSION` is bumped whenever
+a rule, constant or contract changes behaviour.
+
+**The engine never inserts `workouts` rows.** The week outlook is stored in `recommendations.output.weekOutlook`
+and rendered by the Calendar as grey "prévu" cards; a day becomes a real planned workout only when the user pins it.
 
 ## 1. Inputs
 
 ```ts
+interface LoadProfile {                 // shared by Candidate, PlannedSession, HistorySession
+  expectedCredits: StimulusCredits;     // or actual credits for history
+  loadVector: LoadVector;               // 0..10 per dimension
+  intensity: IntensityBand;             // metabolic axis (domain/load/intensity.ts)
+  heavyStrength: boolean;               // any compound set at RPE ≥ 8
+  durationMin: number;
+  modality: Modality;
+  patterns: PatternExposure;
+  impactUnits: number;
+}
+
 interface EngineInput {
-  now: string;                       // ISO datetime in athlete tz
-  today: string;                     // YYYY-MM-DD (athlete tz)
+  now: IsoDateTime; today: IsoDate;
   profile: {
-    goalWeights: Record<GoalKey, number>;         // health_longevity, crossfit, endurance, strength, physique, fun + specific goals
-    weeklyTargets: Record<StimulusKey, number>;   // derived from goals + block + athlete model (§4)
-    baselinePhase: boolean;                       // first weeks → conservative
-    maxHardSessionsPerWeek: number;               // default 3 (spec §8)
-    weeklyHoursTarget: number;                    // current progressive target (e.g. 7 → 12 over months)
-    preferences: { favouriteModalities; dislikedModalities; increments };
-    equipmentAvailable: Equipment[];              // from profile / travel mode
+    goalWeights: GoalWeights;
+    targets: StimulusTargets;                  // deriveWeeklyTargets(...) — already budget-consistent
+    baselinePhase: boolean;
+    maxHardSessionsPerWeek: number;            // default 3
+    weeklyHoursTarget: number;
+    preferences: { favouriteModalities: Modality[]; dislikedModalities: Modality[] };
+    equipmentAvailable: Equipment[];           // athlete_profiles.equipment, overridden by an active travel period
   };
-  history: HistorySession[];        // completed sessions, last 28 days, each with credits/loadVector/exposures/intensity/rpe/fun
-  planned: PlannedSession[];        // today..+7, status planned, `fixed` flag (class time, coaching), optional wodAnalysis
-  crossfitToday?: WodAnalysis;      // when the WOD is known
-  readiness?: ReadinessSnapshot;    // declared + measured + baselines comparison (see domain/readiness)
+  history: HistorySession[];                   // done sessions, last 28 days INCLUDING today (doneToday derived)
+  planned: PlannedSession[];                   // today..+7, { id, date, startMinute?, fixed, status, wodStatus, profile: LoadProfile | null }
+  crossfitToday?: { profile: LoadProfile; confidence: number; source: 'confirmed' | 'blended' | 'prior' };
+  readiness?: ReadinessSnapshot;               // declared (energy, soreness, motivation) + measured deviations + band
   pain: ActivePain[];
-  intent?: UserIntent;              // today's declared wish (want_run, going_crossfit, feel_hot, lazy, have_time, rest, surprise, custom)
+  intents: UserIntent[];                       // active today (day-scoped first)
   availability?: { windows: TimeWindow[]; totalMinutes: number };
-  athleteModel: AthleteModelParams; // half-lives, exercise cost multipliers, tolerance (defaults if unlearned)
-  deloadState?: { active: boolean; reason?: string; until?: string };
+  athleteModel: AthleteModelParams;            // half-lives, tolerances, cost multipliers, impact tolerance, mean daily load
+  deload?: { active: boolean; reason?: string; until?: IsoDate };   // active training block with focus = recovery
+  events: { kind; date; priority; taperDays }[];
+  lastTestDates: Partial<Record<TestKey, IsoDate>>;
 }
 ```
 
-## 2. Derived state (computed first, all explainable)
+### Gate for CrossFit analyses (Layer B never steers Layer A)
+A `WodAnalysis` becomes `crossfitToday` / `tomorrowDemand` only if the inbox item is **confirmed** or
+`parseConfidence ≥ 0.7`. Between 0.5 and 0.7 it is blended 50/50 with the class prior and confidence is capped at
+MEDIUM. Below 0.5 the prior is used and `askFor` contains `wod_review`.
 
-| Derived quantity            | How                                                                                                                                                  |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `residualFatigue[dim]`      | `Σ_sessions load[dim] × 0.5^(hoursSince / halfLife[dim])`, dims: cardiovascular, muscular_lower, muscular_upper, impact, eccentric, technical         |
-| `patternExposure72h[p]`     | weighted sum of pattern exposure over 72 h (weights 1.0 / 0.6 / 0.3 by day)                                                                          |
-| `hardSessions7d`            | count of `intensity = hard` sessions in trailing 7 days, CrossFit metcons included                                                                   |
-| `ledger` (ISO week)         | `credits[k] = Σ credits` for the week (Mon→today); `gap[k] = max(0, target[k] − credits[k])`; `excess[k]`                                             |
-| `remainingDays`             | days left in the ISO week including today                                                                                                            |
-| `weeklyLoad7d`, `load28dAvg`| session-RPE loads; `loadRatio` = 7d / (28d/4) — displayed, never used alone to veto                                                                   |
-| `readinessBand`             | `good | ok | poor` from declared (energy, soreness, motivation) + measured deviations from baselines (RHR ↑, HRV ↓, sleep ↓) — requires ≥ 2 signals to be `poor` |
-| `impactBudget`              | `Σ impact load 7d` vs athlete tolerance                                                                                                              |
-| `tomorrowDemand`            | load vector expected from tomorrow's fixed/planned session (e.g. class WOD with heavy squats)                                                        |
+## 2. Derived state (all explainable, all in the trace)
+
+| Quantity                    | Definition                                                                                                                       |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `residual[dim]`             | `Σ load[dim] × 0.5^(hoursSince / halfLife[dim])` over history (today's done sessions included)                                   |
+| `fatigueRatio[dim]`         | `residual[dim] / tolerance[dim]` — ≥ 1 means a same-dimension heavy stimulus is vetoed                                           |
+| `contributing[dim]`         | top-3 sessions by residual contribution (for "3 gros stimuli jambes en 4 jours")                                                 |
+| `pattern72h`                | weighted pattern exposure (1 / 0.6 / 0.3)                                                                                        |
+| `ledger`                    | `computeLedger` — rolling windows per key, `plannedFixedCredits`, `gap`, `projectedGap`, `stalenessDays`, `urgency`              |
+| `hardDone6d`                | sessions with `intensity = hard` in the trailing 6 days (metcons included, heavy strength excluded)                              |
+| `hardFixedNext3d`           | fixed planned sessions in the next 3 days that are hard (unknown-WOD class counts as hard)                                       |
+| `hardBudgetRemaining`       | `maxHard − hardDone6d − hardFixedNext3d` (baseline: engine-proposed hard = `max(0, 2 − fixedClassesThisWeek)`)                   |
+| `heavyStrength7d`           | sessions with `heavyStrength = true` in 7 days (budget ≤ 3)                                                                      |
+| `impact7dIU`                | Σ impact units over 7 days vs `athleteModel.impactWeeklyToleranceIU`                                                             |
+| `polarisation14d`           | minutes hard / moderate / easy over 14 days of cardio+metcon work                                                                |
+| `consecutiveTrainingDays`   | days with a non-rest session ending today                                                                                        |
+| `restDaysThisWeek`          | days of the ISO week (Mon→today) with no session or only mobility                                                                |
+| `doneToday`                 | history sessions dated today; if any is primary-level (not mobility/walk), only bonus/recovery candidates are evaluated          |
+| `doublesThisWeek`           | days this week with ≥ 2 non-mobility sessions                                                                                    |
+| `tomorrowDemand`            | load profile of tomorrow's fixed session: its analysis if gated in, else the class prior                                         |
+| `readinessBand`             | `good | ok | poor` — poor requires ≥ 2 signals (≥ 1 declared or ≥ 2 measured); thresholds in defaults.ts                          |
+| `dailyLoadCap`              | `max(500, 1.3 × meanDailyLoadAU)`                                                                                                |
+| `fresh`                     | all `fatigueRatio ≤ 0.4`, readiness good, no hard in 48 h, no test in 14 d                                                       |
+| `fatigueSignals`            | count of deload signals (see §8)                                                                                                 |
 
 ## 3. Candidate generation
 
-Candidates come from a code catalog (`domain/engine/candidates.ts`) plus context-specific ones:
+Catalog in `domain/engine/candidates.ts`, each candidate is a `LoadProfile` + `{ kind, title, timeOfDay?, equipment, family }`.
+Reference load vectors come from `REFERENCE_LOAD`.
 
 - Strength: `strength_lower`, `strength_upper`, `strength_full`, `accessory_upper`, `olympic_technique`, `gymnastics_skill`
-- Endurance easy: `run_easy_45`, `run_easy_60`, `run_long_90`, `bike_easy_60`, `bike_long_120`, `row_easy_30`, `ski_easy_30`, `walk_45`
-- Endurance hard: `run_threshold`, `run_vo2`, `run_tempo`, `bike_intervals`, `row_intervals`, `strides`
-- CrossFit: `crossfit_as_programmed` (only if `crossfitToday`/planned fixed WOD known — credits from the analysis), `crossfit_generic` (unknown WOD: median box-class assumptions, lower confidence), `partner_wod_fun`, `benchmark_attempt`
+- Easy endurance: `run_easy_45`, `run_easy_60`, `run_long_90`, `bike_easy_60`, `bike_long_120`, `row_easy_30`, `ski_easy_30`, `walk_45`
+- Hard endurance: `run_tempo`, `run_threshold`, `run_vo2`, `strides`, `bike_intervals`, `row_intervals`
 - Recovery: `mobility_20`, `recovery_spin_30`, `rest`
-- Intent-specific: from `intent.kind` (e.g. `want_run` adds run variants at 3 intensities; `have_time` enables double-session evaluation)
+- Tests: `test_run_5k`, `test_row_2k` (only when `fresh`)
+- CrossFit — **generated, not catalog**: `crossfit_as_programmed` when a fixed class exists today with a gated-in analysis;
+  `crossfit_generic` (static prior, confidence 0.4, or the learned weekday box prior when its confidence ≥ 0.5) when a fixed
+  class exists today without one. Never proposed on a day without a class.
+- Intent families (composite, credits summed, loads max-merged): `hyrox_{easy,moderate,hard}`, `partner_wod_{easy,hard}`,
+  `run_{easy,tempo,hard}`, `bike_{easy,long,hard}`, `benchmark_attempt`, `just_move_20`.
 
-Each candidate declares `expectedCredits`, `loadVector`, `durationMin`, `intensity`, `modality`, `patterns`, `equipment`,
-`impact`, `timeOfDay?`.
+Candidates are filtered by equipment and availability before scoring.
 
-## 4. Rules (Layer A)
+## 4. Rules (Layer A) — v1.0 set
 
-A rule is `{ id, kind: 'safety' | 'balance' | 'preference', evaluate(ctx, candidate?) → RuleOutcome | null }` where
-`RuleOutcome = { effect: 'veto' | 'penalty' | 'bonus' | 'note', score?: number, message: string, data?: object }`.
-Safety rules can veto; balance/preference rules only shift scores. All fired rules are recorded.
+A rule is `{ id, kind: 'safety' | 'balance' | 'preference', evaluate(ctx, candidate?) → RuleOutcome | null }`,
+`RuleOutcome = { effect: 'veto' | 'score' | 'note', score?: number, message: string, data?: object }`.
+Score scale is fixed: safety −4, balance ±3, preference ±2, intent +6 (partial +3), variety −2..+1. Only safety rules veto.
 
-Initial rule set (ids are stable API for tests and explanations):
+| id                                   | kind       | v1.0 logic                                                                                                                              |
+| ------------------------------------ | ---------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `HIGH_LOWER_BODY_FATIGUE`            | safety     | `fatigueRatio.muscular_lower ≥ 1` → veto candidates with `muscular_lower ≥ 6`; the interference term handles the gradient (no extra penalty) |
+| `HIGH_UPPER_BODY_FATIGUE`            | safety     | same for upper                                                                                                                          |
+| `HIGH_CARDIO_FATIGUE`                | safety     | `fatigueRatio.cardiovascular ≥ 1` → veto `intensity = hard`                                                                             |
+| `HIGH_IMPACT_LOAD`                   | safety     | `impact7dIU > tolerance` or `fatigueRatio.impact ≥ 1` → veto candidates with `impact ≥ 5`; −3 on running above 0.8 × tolerance          |
+| `HARD_SESSION_BUDGET_EXCEEDED`       | safety     | `hardBudgetRemaining ≤ 0` → veto engine-proposed hard candidates (fixed classes are never vetoed by budget)                             |
+| `HEAVY_STRENGTH_BUDGET`              | safety     | `heavyStrength7d ≥ 3` → veto heavy strength candidates                                                                                  |
+| `HARD_EASY_ALTERNATION`              | balance    | −3 on hard if hard yesterday or fixed hard tomorrow                                                                                     |
+| `PATTERN_REPEAT_72H`                 | balance    | −2 when the candidate's dominant pattern (squat vs hinge vs push vs pull) already ≥ 3 in `pattern72h`                                   |
+| `TOMORROW_HEAVY_CONFLICT`            | balance    | −3 on candidates whose region load ≥ 6 when `tomorrowDemand` loads the same region ≥ 6                                                  |
+| `FIXED_CLASS_RESERVE`                | balance    | class today/tomorrow with unknown WOD → −3 on `muscular_lower ≥ 6` or hard candidates; one hard slot reserved                            |
+| `CROSSFIT_COVERS_STIMULUS`           | balance    | today's class credits a key ≥ 0.8 → −3 on candidates duplicating it; `note` "couvre ton stimulus X"                                     |
+| `READINESS_POOR`                     | safety     | band poor → veto hard; −2 moderate; note. Never fires on a single noisy metric                                                            |
+| `PAIN_ACTIVE`                        | safety     | pain ≥ 4 → veto candidates involving flagged movements/patterns; ≥ 7 or sudden+persistent → `MEDICAL_ADVICE` advice                       |
+| `WEEKLY_GAP_PRIORITY`                | balance    | expressed by the coverage term (documented here for explanations: top gaps are named)                                                    |
+| `PROTECT_EASY_VOLUME`                | balance    | 14-day window, ≥ 90 cardio minutes: −3 on hard if hard share > 25 %; −2 on moderate if moderate share > 15 %; skipped when budget vetoed |
+| `WEEKLY_RECOVERY_DAY`                | safety     | `consecutiveTrainingDays ≥ 6` → veto hard, +6 recovery; balance: no rest day yet and `remainingDays ≤ 2` → +4 recovery                  |
+| `LONG_SESSION_PLACEMENT`             | balance    | long aerobic only with ≥ 90 min window and no hard yesterday (else −3)                                                                  |
+| `DELOAD_ACTIVE`                      | safety     | veto VO2/benchmarks/tests; strength allowed at RPE ≤ 7 with sets × 0.6 (prescription note); impact tolerance × 0.5                        |
+| `BASELINE_PHASE_CONSERVATIVE`        | safety     | engine-proposed hard ≤ `max(0, 2 − fixedClassesThisWeek)`; no doubles; confidence ≤ MEDIUM                                              |
+| `INTENT_RESPECT`                     | preference | +6 exact family match, +3 partial (same modality, other intensity)                                                                       |
+| `INTENT_DECLINED_WITH_ALTERNATIVE`   | note       | fired when every exact-match candidate is vetoed → nearest safe variant promoted, explanation names the vetoing rule                      |
+| `PLAN_ADHERENCE`                     | preference | +3 to today's planned non-fixed session so the plan is stable but intent (+6) beats it                                                   |
+| `VARIETY`                            | preference | −2 same kind three days running; +1 favourite modality; −2 disliked                                                                     |
+| `AVAILABILITY_FIT`                   | safety     | duration > largest window → veto (shorter variant substituted when one exists)                                                            |
+| `TEST_OPPORTUNITY`                   | balance    | `fresh` and a goal needs the test → +3 on the test candidate                                                                             |
+| `EVENT_TAPER`                        | safety     | event within `taperDays` → veto hard non-specific, +3 specific easy                                                                      |
+| `RESCHEDULE_SUGGESTED`               | note       | today's planned non-fixed session displaced by intent or veto → `reschedules[]` entry                                                    |
 
-| id                                   | kind       | Logic (summary)                                                                                                         |
-| ------------------------------------ | ---------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `HIGH_LOWER_BODY_FATIGUE`            | safety     | residual muscular_lower ≥ threshold → veto candidates with lower-body muscular load ≥ 6; penalty above 3                 |
-| `HIGH_UPPER_BODY_FATIGUE`            | safety     | same for upper                                                                                                          |
-| `HIGH_IMPACT_LOAD`                   | safety     | impact residual or 7-day impact budget exceeded → veto high-impact hard candidates, penalise running                     |
-| `HIGH_CARDIO_FATIGUE`                | safety     | cardiovascular residual high → veto hard cardio & hard metcons                                                          |
-| `HARD_SESSION_BUDGET_EXCEEDED`       | safety     | hardSessions7d ≥ max → veto any `hard` candidate (fixed CrossFit class is exempt but flagged → bonus becomes none)       |
-| `PATTERN_REPEAT_72H`                 | balance    | same dominant pattern (squat/hinge/push/pull) heavily loaded within 72 h → penalty                                        |
-| `TOMORROW_HEAVY_CONFLICT`            | balance    | tomorrow's fixed session loads the same muscles heavily → penalty on today's heavy candidate for that region             |
-| `CROSSFIT_COVERS_STIMULUS`           | balance    | today's WOD already credits a stimulus ≥ 0.8 → penalty on candidates duplicating it; note explains coverage             |
-| `READINESS_POOR`                     | safety     | readinessBand poor (≥ 2 signals) → veto hard; penalty moderate; note. Never vetoes on a single noisy metric               |
-| `PAIN_ACTIVE`                        | safety     | active pain ≥ 4 → veto candidates involving flagged movements/patterns; ≥ 7 or sudden+persistent → `MEDICAL_ADVICE` note  |
-| `WEEKLY_GAP_PRIORITY`                | balance    | bonus ∝ gap coverage weighted by goal weights (the core "fill the holes" logic)                                          |
-| `PROTECT_EASY_VOLUME`                | balance    | if hard cardio share this week > 25 % of cardio minutes → penalty on hard cardio (polarisation)                         |
-| `AEROBIC_BASE_BELOW_TARGET`          | balance    | `gap[aerobic_easy]` large and remainingDays low → bonus on easy aerobic                                                  |
-| `LONG_SESSION_PLACEMENT`             | balance    | long aerobic candidate only on days with ≥ 90 min availability and no hard session yesterday                            |
-| `DELOAD_ACTIVE`                      | safety     | deload → veto hard strength/VO2; cap durations; note                                                                     |
-| `BASELINE_PHASE_CONSERVATIVE`        | safety     | baselinePhase → hard-session max reduced to 2; no double sessions                                                        |
-| `INTENT_RESPECT`                     | preference | bonus to candidates matching the declared intent; if all matching candidates are vetoed → pick the nearest safe variant and explain (`INTENT_DECLINED_WITH_ALTERNATIVE`) |
-| `VARIETY`                            | preference | same candidate kind 3 days running → penalty; favourite modalities small bonus; disliked penalty                          |
-| `DOUBLE_SESSION_VALUE`               | balance    | second session allowed only if primary is easy/moderate, ≥ 4 h gap, total daily load under cap, and a gap ≥ 0.8 exists   |
-| `AVAILABILITY_FIT`                   | safety     | candidate duration > largest window → veto (or shrink to a shorter variant)                                             |
-| `TEST_OPPORTUNITY`                   | balance    | fresh + no test in 6 weeks + goal needs it → bonus on a test candidate (never more than one per 2 weeks)                 |
-| `EVENT_TAPER`                        | safety     | event within `taper_days` → veto hard non-specific; bonus specific easy                                                  |
-
-## 5. Scoring & selection
+## 5. Scoring (normalised, every term bounded)
 
 ```
-score(c) = Σ_k min(credit_c[k], gap[k]) × goalWeight(k) × 10        // gap coverage
-         − Σ_dim loadVector_c[dim] × residualFatigue[dim] × 0.4      // interference
-         + Σ bonus − Σ penalty                                         // rules
-         + intentBonus (0..15) + varietyBonus (−3..+2)
+w_k         = stimulusWeight(k, goalWeights)                       // 0.5..1.5 (affinity matrix, floor 0.5 = spec §36)
+coverage(c) = min(15, Σ_k min(credit_c[k], projectedGap[k]) × w_k × urgency_k × 10)
+interfere(c)= min(12, Σ_dim (load_c[dim] / 10) × min(fatigueRatio[dim], 1.5) × 3)
+recovery(c) = for c ∈ {rest, mobility_20, recovery_spin_30, walk_45}:
+              10 × clamp((maxFatigueRatio − 0.6) / 0.6, 0, 1) + {poor: 5, ok: 2, good: 0}[readiness] + (consecutiveTrainingDays ≥ 5 ? 4 : 0)
+              (recovery candidates get NO coverage term)
+score(c)    = coverage − interfere + recovery + Σ ruleScores
 ```
 
-1. Fixed session today (class, coaching) → it is the primary unless a safety veto fires; if vetoed, the fixed session
-   stays (the user will go) but the engine attaches a `SCALE_ADVICE` note ("garde la classe, allège les squats") and no bonus.
-2. Otherwise primary = best non-vetoed candidate. If the best candidate is `rest`/`mobility`, the primary is a recovery
-   proposal ("Rien aujourd'hui. Récupère.").
-3. Bonus = best candidate passing `DOUBLE_SESSION_VALUE`, else none.
-4. Alternatives = next 2–3 non-vetoed candidates of *different kinds* than the primary.
-5. Explanation = template over the top 2–3 fired rules + the top gap, ≤ 2 sentences, French.
-6. Confidence: `HIGH` when history ≥ 14 days and readiness present and (no CrossFit today or WOD confidence ≥ 0.7);
-   `MEDIUM` when exactly one of those is missing; `LOW` otherwise or during baseline phase.
+Expected orderings (golden tests): §99-2 fresh + vo2 gap → `run_vo2` > `run_easy` > `rest`; day after squat + AMRAP →
+`accessory_upper` ≈ `rest` > `run_easy` and no heavy lower; §33 Hyrox → hard family vetoed, `hyrox_easy` promoted.
 
-## 6. Intent handling (spec §32–33)
+## 6. Selection and output
 
-`intent.kind` maps to a candidate filter + bonus; **it never bypasses safety rules**. When every intent-matching candidate
-is vetoed, the engine emits `INTENT_DECLINED_WITH_ALTERNATIVE` and promotes the closest safe variant (same modality,
-lower intensity or shorter), producing the spec's "Mauvaise idée aujourd'hui… on garde l'esprit Hyrox" behaviour.
+1. **Fixed session today** → it is the primary. Safety vetoes against it are converted into `SCALE_ADVICE`
+   ("garde la classe, allège les squats"), never a removal. Bonus evaluated per §7.
+2. **Primary-level session already done today** → `primaryDone = true`, primary = that session, only bonus/recovery evaluated.
+3. Otherwise primary = best non-vetoed candidate. If that is a recovery candidate → "Rien aujourd'hui. Récupère." wording.
+4. Alternatives = next 2–3 non-vetoed candidates of different families than the primary (3 when confidence is LOW).
+5. Reschedule: if today's planned non-fixed session is not the primary, `reschedule(planned, week)` = earliest later day
+   this week that is not vetoed, ≥ 48 h from a same-region heavy exposure and not the day before a fixed class heavy in that
+   region; else next week. Emits `RESCHEDULE_SUGGESTED`.
+6. Explanation: French, ≤ 2 sentences, templated from the top fired rules + top gap + `contributing` sessions.
+7. Confidence (§9). Trace: derived state, every candidate's score breakdown, every rule hit.
 
-## 7. Weekly targets derivation
+```ts
+interface Recommendation {
+  date; engineVersion;
+  primary: Option; primaryDone: boolean;
+  bonus: Option | { kind: 'none'; reason: string };
+  alternatives: Option[];                          // ≤ 3
+  reschedules: { plannedId; fromDate; toDate; reason }[];
+  advice: { code: 'SCALE_ADVICE' | 'MEDICAL_ADVICE' | 'MISSING_RPE'; text }[];
+  askFor: ('wod' | 'wod_review' | 'readiness' | 'rpe')[];
+  deloadProposal?: { reason; signals: string[]; until: IsoDate };
+  explanation: string;
+  confidence: { level: Confidence; score: number; components: Record<string, number> };
+  rulesTriggered: RuleHit[];
+  trace: EngineTrace;
+}
+interface Option extends LoadProfile { kind: SessionKind | string; family: string; title: string; timeOfDay?: 'morning' | 'midday' | 'evening'; prescriptionRef?: { templateId?: string; cardioSteps?: CardioStep[] }; score: number; reason: string }
+```
 
-`deriveWeeklyTargets({ goalWeights, block, weeklyHoursTarget, athleteModel })` starts from the spec §8 defaults
-(strength_lower 2, strength_upper 2, hypertrophy 1, olympic_technique 1, gymnastics_skill 1, aerobic_easy 3,
-aerobic_long 1, threshold 1, vo2max 0.5, power 0.5, crossfit_conditioning 3, mobility_recovery 2), scales by block focus
-(never below 50 % of default for any key — "a dominant never erases other capacities") and by weekly hours target.
+## 7. Bonus (double session) gate — evaluated on the BONUS candidate, never on the primary
 
-## 8. Weekly macro-adjustment (v1 minimal)
+```
+bonus allowed iff  bonus.intensity = easy
+               AND every bonus load dim ≤ 3 AND (bonus.impact ≤ 2 OR primary.impact = 0)
+               AND ∃ key k covered by bonus with projectedGap[k] ≥ 0.8 AND projectedGap[k] > freeDaysRemaining × 0.8
+               AND gap between sessions ≥ 4 h (≥ 6 h when primary is hard) AND both fit availability
+               AND dayLoad(primary + bonus) ≤ dailyLoadCap AND maxFatigueRatio ≤ 0.6 AND readiness ≠ poor
+               AND doublesThisWeek < maxDoubles (2) AND NOT baselinePhase AND NOT deload
+```
+Ordering: with an evening class, an easy morning bonus is placed before it only if the class prior/analysis is not
+lower-body heavy; after a hard class only ≤ 30 min Z2 / mobility; unknown-WOD class → bonus ≤ 20 min, confidence ≤ MEDIUM.
+`have_time` only widens availability. Refusals carry `{ kind: 'none', reason }` for the UI.
 
-`reviewWeek(history, targets, readiness, pain, fun)` → `{ achieved, missing, excess, loadTrend, funAvg, flags }` and
-`nextWeekTargets` = targets nudged ±10 % based on flags (fatigue signals → −10 %, all green and fun ≥ 7 → +5 % volume).
-Missed sessions are **not** carried over.
+## 8. Deload (spec §42) — `evaluateDeload(history28d, readinessTrend, pain, fun, events)`
 
-## 9. Layer B (AI) responsibilities and guardrails
+Signals: load ratio > 1.3 two weeks running; RHR 7-d ≥ baseline + 4 bpm; HRV 7-d ≤ baseline − 10 %; sleep 7-d ≤ baseline − 45 min;
+comparable-group RPE ↑ ≥ 1; e1RM of the three main lifts flat/↓ for 3 weeks at maintained volume; fun ≤ 4/10 over 2 weeks;
+motivation 😫 ≥ 3 days/week; active pain ≥ 4. **Reactive** deload when ≥ 3 signals (or pain ≥ 6); **preventive** after 4
+weeks at ≥ 85 % target achievement without one; event taper via `EVENT_TAPER`. Duration 6 days. Effects = target multipliers
+(`DELOAD.multipliers`) + `DELOAD_ACTIVE`. Persisted by the service as a `training_blocks` row with `focus = recovery`,
+`source = ENGINE`, `reason`, `rules_triggered`; the user can end it early. `fitnessSignal` = { e1RM trend 28 d, pace@HR trend,
+latest tests }, `fatigueSignal` = number of signals — both shown, neither is a "score".
 
-| Task            | Input the model sees                                                            | Output schema         | Consumer                                  |
-| --------------- | ------------------------------------------------------------------------------- | --------------------- | ----------------------------------------- |
-| `parseWod`      | raw text (or image) + exercise alias list                                       | `NormalizedWod`       | `WodAnalyzer` (deterministic)             |
-| `parseIntent`   | one user sentence + today/tomorrow dates                                        | `UserIntent`          | engine (as `intent`)                      |
-| `explain`       | rulesTriggered + short numeric context (never the whole DB)                     | `{ text }`            | UI (templated fallback always available)  |
-| `suggestFun`    | allowed candidate kinds (already engine-filtered) + preferences                 | `{ options[3] }`      | "SURPRISE ME" — each option re-scored by engine |
-| `monthlyReview` | structured monthly summary                                                       | `{ narrative }`       | Monthly review screen                     |
+## 9. Confidence
 
-The model never receives raw calendar titles, tokens, or unrelated history. Every output is Zod-validated; on failure the
-service falls back to the heuristic parser / templates and records the failure in `ai_invocations`.
+`score = min(data, readiness, todayWod, estimationShare, margin)`; `data` = analysed sessions in 28 d (≥ 8 → 1, ≥ 4 → 0.7, else 0.4);
+`readiness` = measured+declared 1, declared only 0.75, none 0.4; `todayWod` = confirmed/≥ 0.7 → 1, blended 0.6, prior 0.4, no class 1;
+`estimationShare` = 1 − fraction of residual coming from prior/template-only sessions; `margin` = clamp((score#1 − score#2) / 10, 0.5, 1).
+HIGH ≥ 0.8, MEDIUM ≥ 0.55, else LOW; baseline phase caps at MEDIUM. LOW effects: hard candidates require intent or fixed status,
+loads shown as ranges, three alternatives, `askFor` populated.
 
-## 10. Test plan (spec §99 mapped)
+## 10. Weekly targets and macro-adjustment
 
-- Yesterday heavy squat + wall balls; today CrossFit with front squats → no heavy leg accessory in primary/bonus/alternatives; `CROSSFIT_COVERS_STIMULUS` + `HIGH_LOWER_BODY_FATIGUE` fired.
-- Two easy days, readiness good, `vo2max` gap → a VO2 candidate may be primary.
-- Intent `want_run`, impact residual low → primary is a run; planned strength moved (flag `RESCHEDULE_SUGGESTED`).
-- Intent `want_run hard`, impact high + readiness poor → primary is an easy/non-impact alternative; `INTENT_DECLINED_WITH_ALTERNATIVE`.
-- Hyrox case (§33) → decline with alternative.
-- Hard-session budget reached → no hard candidate proposed; fixed class still primary with `SCALE_ADVICE`.
-- Deload active → no hard strength/VO2.
-- Pain knee 6 → no squat-heavy candidates; pain 8 sudden → `MEDICAL_ADVICE` note.
-- Baseline phase → max 2 hard, no double.
-- Golden trace snapshot: same input → identical output (determinism).
+`deriveWeeklyTargets` (domain/stimulus/targets.ts): spec §8 defaults per key window, block/goal/volume multipliers, floor 50 %,
+post-condition Σ weekly hard exposures ≤ maxHard (tested). `reviewWeek` → `{ achieved, missing, excess, loadTrend, funAvg, flags,
+deloadEvaluation, nextTargets }`; targets nudged ±10 % from flags; missed sessions are **not** carried over.
+
+## 11. Layer B responsibilities and guardrails
+
+| Task            | Input the model sees                                          | Output (Zod, strict)                 | Consumer                                       |
+| --------------- | ------------------------------------------------------------- | ------------------------------------ | ---------------------------------------------- |
+| `parseWod`      | raw text/image + alias list                                   | `NormalizedWod` (structure only)     | `analyzeWod` (deterministic)                   |
+| `parseIntent`   | one sentence + today/tomorrow dates                           | `UserIntent` (bounded enums/numbers) | engine (`intents`)                             |
+| `explain`       | rulesTriggered + short numeric context                        | `{ text }` display-only              | UI; post-check rejects text naming absent kinds or loads; templated fallback |
+| `suggestFun`    | allowed candidate kinds (engine-filtered) + preferences       | `{ options: NormalizedWod | CardioStep[] }[3]` | service analyses each and re-runs the engine; vetoed options dropped |
+| `monthlyReview` | structured monthly summary                                    | `{ narrative }`                      | Monthly review screen                          |
+
+AI tools are read-only over goals/targets/plan. `src/server/providers/ai` cannot import `@/db` (ESLint).
+
+## 12. Test plan (spec §99 + review)
+
+Golden scoring tests for §4, §33, §99-1..4; hard-budget lookahead ("class Saturday, 2 hard done Thursday → no VO2 today");
+class tomorrow unknown → no heavy lower today; class tonight unknown + vo2 gap → VO2 not primary; parse confidence 0.4 → prior +
+`wod_review`; Monday fresh + class tonight → no bonus; Thursday aerobic gap 2 with one free day → 30′ Z2 bonus; pain knee 6 → no
+squat-heavy; pain 8 sudden → `MEDICAL_ADVICE`; baseline phase → ≤ 2 hard, no double; deload → no VO2; determinism; `checkPlacement`
+"Heavy Legs the day before a squat class → warn"; `projectWeek` never proposes two hard days in a row.

@@ -1,6 +1,7 @@
-# Athlete OS — Architecture
+# Athlete OS — Architecture — v2
 
 > Companion documents: `SPEC.md` (product source of truth), `DATA_MODEL.md`, `ENGINE.md`, `DECISIONS.md` (ADRs), `ROADMAP.md`.
+> v2 integrates the verified findings of the adversarial architecture review (data model, engine, product/UX, security/ops).
 
 ## 1. Product analysis in one paragraph
 
@@ -14,143 +15,199 @@ Three consequences drive the architecture:
 
 1. **The domain layer is pure and testable.** All physiology math, WOD analysis, ledgers and rules live in
    `src/domain/**` with zero framework/DB imports (enforced by ESLint). Tests run in milliseconds without a database.
-2. **Provenance is first-class.** Every stored datum carries `source` (`GARMIN | USER | AI_PARSED | CALCULATED | SCALE | MANUAL`),
+2. **Provenance is first-class.** Every stored datum carries `source` (`GARMIN | DEVICE | SCALE | USER | MANUAL | AI_PARSED | HEURISTIC | CALCULATED | ENGINE`),
    `confidence`, and calculated metrics carry `algorithmVersion`. Estimated values never masquerade as measured ones.
-3. **AI is a translator, never an authority.** Layer B (LLM) produces schema-validated JSON (WOD structure, intent,
-   explanations). Layer A (deterministic rules) is the only thing allowed to change the plan.
+3. **AI is a translator, never an authority.** Layer B (LLM) produces schema-validated, structure-only JSON (WOD structure,
+   intent, explanation wording). Layer A (deterministic rules) is the only thing allowed to change the plan.
 
-## 2. Stack (decided — see DECISIONS.md for rationale)
+## 2. Stack (decided — see DECISIONS.md)
 
-| Concern            | Choice                                                                                   |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| Framework          | Next.js 16 (App Router, React 19, Server Components + Server Actions), TypeScript strict |
-| Styling            | Tailwind CSS 4, design tokens in `globals.css`, dark-first                               |
-| Database           | PostgreSQL. Production: Supabase Postgres. Local dev & integration tests: embedded PGlite |
-| ORM / migrations   | Drizzle ORM + drizzle-kit (SQL migrations committed in `drizzle/`)                       |
-| Auth               | Supabase Auth (`@supabase/ssr`) in production; `AUTH_MODE=local` single user in dev only |
-| Validation         | Zod 4 (AI outputs, server action inputs, JSONB columns)                                  |
-| AI                 | Anthropic SDK (Layer B); `AI_PROVIDER=mock` fallback with a deterministic heuristic parser |
-| Client state       | Zustand + IndexedDB (`idb-keyval`) for the in-session strength store and offline queue   |
-| Charts             | Recharts                                                                                 |
-| FIT parsing        | `@garmin/fitsdk` (official Garmin FIT SDK), server-side                                  |
-| PWA                | `app/manifest.ts` + hand-written `public/sw.js` (app-shell cache, no Turbopack coupling) |
-| Tests              | Vitest (domain unit tests; DB integration tests on PGlite)                               |
-| Lint / format      | ESLint 9 flat config (`eslint-config-next` + typescript-eslint) + Prettier               |
-| Hosting / jobs     | Vercel + Vercel Cron → `/api/cron/*` guarded by `CRON_SECRET`                             |
-| Observability      | Structured JSON logger (`src/server/logging.ts`), no PII in logs                         |
+| Concern            | Choice                                                                                                                     |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| Framework          | Next.js 16 (App Router, React 19, Server Components + Server Actions + Route Handlers), TypeScript strict                  |
+| Styling            | Tailwind CSS 4, design tokens in `globals.css`, dark-first, 56 px tap targets                                              |
+| Database           | PostgreSQL. Production: Supabase Postgres (**`DATABASE_URL` mandatory**). Dev & tests: embedded PGlite (never in prod)     |
+| ORM / migrations   | Drizzle ORM + drizzle-kit; SQL migrations committed in `drizzle/`, applied against `DIRECT_DATABASE_URL` before deploys    |
+| Auth               | Supabase Auth, **email + password / email OTP only** (no magic link, no OAuth in MVP 1); `AUTH_MODE=local` for localhost   |
+| Validation         | Zod 4 (AI outputs `.strict()`, server action inputs, JSONB columns, env)                                                   |
+| AI                 | Anthropic SDK (Layer B) with `maxRetries: 1`, `timeout: 30 s`, per-kind budgets; `AI_PROVIDER=mock` → heuristic parser    |
+| Client state       | Zustand (`persist`, `skipHydration`) + IndexedDB via `idb-keyval` for the active strength session and its event outbox     |
+| Charts             | Recharts                                                                                                                   |
+| FIT parsing        | `@garmin/fitsdk`, server-side, in the upload request                                                                       |
+| PWA                | `app/manifest.ts` + hand-written `public/sw.js` (shell precache incl. strength mode, network-first navigations)            |
+| Tests              | Vitest (domain unit tests; DB integration tests on PGlite incl. an RLS assertion)                                          |
+| Lint / format      | ESLint 9 flat config + typescript-eslint + import boundaries; Prettier                                                     |
+| Hosting / jobs     | Vercel + **one** Vercel Cron (`/api/cron/daily`) — Hobby allows 2; the second slot is reserved for Garmin sync in MVP 2    |
+| Observability      | Structured JSON logger with a closed `LogFields` type (no free-form objects, no health data), `/api/health`                |
 
-## 3. Layered layout
+## 3. Layered layout and import boundaries
 
 ```
 src/
-  domain/          PURE TypeScript. No React, no Next, no DB, no SDK. 100% unit-testable.
-    core/          shared enums & types: MovementPattern, Modality, MuscleGroup, StimulusKey, LoadDimension,
-                   DataSource, Confidence, dates helpers
-    exercises/     exercise catalog (seed data) + alias resolver ("DL" → deadlift)
-    stimulus/      stimulus taxonomy, credits, weekly targets, exposure ledger, exposure maps
-    load/          session-RPE load, multi-dimensional load vector, residual fatigue decay, rolling stats
-    strength/      e1RM (Epley v1), progression/autoload, rest timer policy, strength templates
-    wod/           NormalizedWod zod schema, deterministic WodAnalyzer, heuristic text parser (fallback)
-    cardio/        zones (versioned), cardio workout builder model, metrics (pace@HR, decoupling, EF),
-                   comparable-group classifier
-    readiness/     readiness snapshot summarisation against baselines
-    athlete-model/ personal baselines, learned parameters (half-lives, per-exercise cost multipliers)
-    engine/        Layer A: EngineInput → Recommendation (candidates, rules, scoring, explanation, confidence, trace)
-  db/              Drizzle schema (one file per aggregate), client factory (postgres.js | PGlite), migrator, seed
-  server/          application services (use-cases), providers, auth, jobs, logging
-    auth/          getCurrentUser() — Supabase or local mode
-    providers/     garmin/ (GarminProvider, Mock, Official stub), ai/ (AiProvider, Anthropic, Mock),
-                   bodycomp/ (BodyCompositionProvider, Manual), calendar/ (CalendarProvider, Null)
-    services/      workouts, strength-sessions, wod-inbox, recommendations (assemble → engine → persist),
-                   ledger, progress queries, activities (FIT import), readiness, profile, data export/delete
-    jobs/          cron handlers (morning readiness sync, evening ledger, weekly review)
-    fit/           FitParser (tolerant field extraction) + normalisation to Activity
-  app/             Next.js routes (App Router). Server Components read via services; mutations via Server Actions.
-  components/      UI: design system primitives (`ui/`), feature components (`today/`, `strength/`, `inbox/`, ...)
-  stores/          client stores (active strength session, offline mutation queue)
-  lib/             framework-agnostic helpers usable on both client and server (formatting, ids, dates)
+  domain/          PURE TypeScript, isomorphic. No React/Next/DB/SDK. 100 % unit-testable.
+    core/          vocabulary (patterns, modalities, muscles, stimuli, load dims, intents, provenance), date helpers
+    exercises/     catalog (97 entries, FR/EN aliases) + resolver
+    stimulus/      goal→stimulus affinity, target derivation, rolling exposure ledger, heatmaps
+    load/          session-RPE, residual fatigue, rolling load, intensity classifier, impact units, planned→actual scaling
+    strength/      e1RM (Epley v1), autoload progression, rest policy, templates
+    wod/           NormalizedWod (strict Zod), WodAnalyzer, heuristic parser
+    cardio/        zones (versioned), workout builder model, metrics (pace@HR, decoupling, EF), comparable groups
+    readiness/     readiness summary (declared + measured deviations → band)
+    athlete-model/ defaults (single source of numeric priors), baselines, merged params
+    engine/        Layer A: runEngine / projectWeek / checkPlacement, candidates, rules, scoring, explanation, confidence
+  lib/             isomorphic helpers (ids, formatting, cn)
+  stores/          client stores (active strength session + outbox). Import domain + lib + actions/api ONLY.
+  components/      UI (design system primitives in ui/, feature components). Import domain types, lib, stores, actions ONLY.
+  app/             routes. RSC pages import server/services; client islands import stores/components; actions.ts import server.
+  server/          `import "server-only"`. auth/, env.ts, flags.ts, logging.ts, providers/, services/, jobs/, fit/, repo/
+  db/              `import "server-only"`. Drizzle schema (helper `userOwnedTable` → user_id FK cascade + RLS), client, migrator, seed
 ```
 
-Dependency direction (enforced by ESLint `no-restricted-imports` on `src/domain/**`):
+Allowed edges (ESLint `no-restricted-imports`):
 
 ```
-app → components → (stores) → server/services → domain
-                              server/services → db
-                              server/providers → domain (types only)
+app(RSC/actions/api) → server/services → { domain, db, server/providers, server/repo }
+app(client) / components / stores → { domain, lib, app/**/actions, /api/* }        (never @/server, never @/db)
+server/providers/ai → domain only (never @/db)
+domain → nothing above it
 ```
 
-`domain` never imports upward. `db` never imports `server`. Providers return domain/normalised types, never raw vendor
-payloads (raw payloads are persisted verbatim in `raw_payloads` for reprocessing).
+### Route map (MVP 1)
+
+| Route                                  | Boundary                      | Notes                                                                                  |
+| -------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------- |
+| `/today`                               | RSC + client islands          | one `getTodayView()` query; `AUTRE OPTION` cycles alternatives client-side              |
+| `/calendar`                            | RSC + client island           | week outlook from `recommendations.output.weekOutlook` + real workouts; move → `checkPlacement` |
+| `/train`                               | RSC                           | Strength / Cardio / CrossFit / Free entry points                                       |
+| `/train/strength/[workoutId]`          | **client-only shell**         | hydrates from IndexedDB bundle; works cold offline (precached by SW)                   |
+| `/train/strength/new`, `/train/cardio/new` | RSC + island              | template picker / cardio builder                                                       |
+| `/inbox`, `/inbox/new`, `/inbox/[id]`  | RSC + island                  | paste → parse → confirm (read-only structure + "Corriger le texte") → analyse → replan  |
+| `/log/{activity,coach,rest,pain,body}` | RSC + form island             | "+" palette targets                                                                    |
+| `/progress`                            | RSC                           | four dashboards + enjoyment                                                            |
+| `/profile`, `/profile/goals`, `/profile/data`, `/profile/integrations` | RSC + islands | goals weights, increments, export/delete, flags |
+| `/workouts/[id]`, `/exercises/[id]`, `/activities/[id]` | RSC              | detail pages with in-app back header                                                   |
+| `/onboarding/[step]`                   | RSC + island                  | gated in `(app)/layout.tsx` by `users.onboarding_completed_at`; completion sets `baseline_phase_until = +21 d` |
+| `/api/sync/strength`                   | Route Handler                 | outbox event batches (stable URL across deploys)                                        |
+| `/api/import/fit`, `/api/inbox/photo`  | Route Handler, multipart      | `export const maxDuration = 60`; parse in-request                                       |
+| `/api/cron/daily`, `/api/health`       | Route Handler                 | cron secret (constant-time, fails closed); health = `select 1`                          |
+
+Every non-tab route renders an in-app header with back/close (iOS standalone has no browser chrome).
 
 ## 4. Runtime shape
 
-### Reads (fast path)
-Server Components call services directly (`getTodayView(userId)`) and render. The Today recommendation is **read from
-the `recommendations` table** (computed by a job or lazily on first request of the day), never recomputed on every render.
+### Today (reads are instant)
+`getTodayView(userId)` returns `{ recommendation, plannedWorkouts, activeSessionHint, readinessDeclared, insight }` from the
+`recommendations` row computed by the cron. If the row is missing, `ensureTodayRecommendation()` is an **idempotent upsert
+fallback** (never the normal path). Intent buttons call a server action that awaits the inline `recompute()` and returns the
+new `Recommendation`, rendered immediately (`useOptimistic` for the label); `revalidatePath` only for consistency.
+`AUTRE OPTION` cycles `Recommendation.alternatives` client-side and persists `accepted_option` fire-and-forget.
+Declared readiness (3 taps) is an inline Today chip in MVP 1; measured readiness arrives with Garmin in MVP 2.
 
-### Writes
-Server Actions (`"use server"`) validate input with Zod, call a service, revalidate the path. Services are plain async
-functions taking `{ db, userId, now }` so they are testable on PGlite.
+### Recompute
+`recommendationService.recompute(userId, date)`: assemble `EngineInput` (indexed queries over 28 days), `runEngine`,
+`projectWeek`, persist one versioned row in a transaction under `pg_advisory_xact_lock(hashtext(userId))`. Triggered inline by
+every training-state write (completed workout, WOD confirmed, readiness, intent, pain, calendar move) and by the cron. The
+non-blocking tail (PR detection, ledger rollups, computed metrics) runs in Next's `after()`.
 
-### In-session strength mode (offline-first)
-The active session lives in a Zustand store persisted to IndexedDB. Every completed set is appended to an
-**outbox** (`{ id, type, payload, createdAt }`). A background flusher posts the outbox to a server action with
-idempotency keys; the server upserts by client-generated set id. If the network is down, nothing changes for the user.
+### Strength session (offline-first) — the contract
+1. **Bundle.** `strengthSessionService.getBundle(workoutId)` → `{ workout, exercises[] (prescription incl. loadSuggestionKg,
+   lastExposure, bestE1rm, incrementKg), restPolicy }`. Today prefetches today's bundle into IndexedDB via a small client island;
+   `/train/strength/[workoutId]` is a client-only shell that hydrates from IndexedDB (`persist` with `skipHydration: true`,
+   explicit `rehydrate()`, a `hydrating` state) — never an RSC that needs the server. Ad-hoc sessions get client uuids.
+2. **Source of truth.** While `workouts.status = in_progress` the client store is authoritative; the server is a write-behind
+   replica. Resume = IndexedDB first, server replica only when IndexedDB is empty. Today shows "Reprendre la séance" when a
+   session is in progress.
+3. **Client-side intelligence.** Autoload (`decideProgression`), rest policy and e1RM are domain functions imported by the
+   store — they work offline. Rest timer stores `restEndsAt` (epoch ms) and derives the countdown; re-syncs on
+   `visibilitychange`; requests `navigator.wakeLock`; an `AudioContext` is unlocked on the DONE tap so the chime plays;
+   no haptics on iOS web.
+4. **Outbox = ordered event log** `{ id: uuid, workoutId, seq, type: session_started | set_completed | set_updated | set_deleted |
+   exercise_added | exercise_swapped | session_finished, payload, at }`, posted in batches to `POST /api/sync/strength`, applied in
+   one transaction, idempotent via `client_events (id)`; acknowledged ids are pruned client-side. All ids client-generated
+   (`workouts`, `workout_exercises`, `strength_sets`). Flush on `online`, `visibilitychange`, after each event when online, on app open.
+5. **Finish.** `session_finished` carries RPE / feeling / pain; the server computes e1RM, PRs, `workout_analyses.actual`, then `recompute`.
+6. Logout flushes the outbox first and is refused while it is non-empty; on 401 the client keeps IndexedDB, re-authenticates, then flushes.
+
+### WOD Inbox flow (spec §49)
+`Today[JE VAIS AU CROSSFIT]` records intent `going_crossfit` → `/inbox/new?for=DATE` (textarea, paste, quick chips) →
+`createInboxItem` **saves raw text first** (status `new`, `content_hash`) → `parseInboxItem` (AI if `AI_PROVIDER=anthropic`, else
+heuristic; AI failure → heuristic, status `needs_review` when confidence < 0.7) with a visible "Analyse…" state → `/inbox/[id]`
+read-only structure + "C'est ça / Corriger le texte" → `confirmInboxItem({ date, startLocal })` (default from
+`preferred_training_times.crossfit`) creates the **fixed** crossfit workout, materialises `workout_exercises`, writes
+`workout_analyses.planned`, runs `recompute` inline → back to Today with "Parfait. Cette séance couvre…" + bonus/none.
+After the class: score + RPE + feeling (< 10 s) → `workout_analyses.actual` → recompute.
+The parser is selected by `AI_PROVIDER`; `FLAG_AI_COACH` gates chat / explain / suggestFun only.
 
 ### Background work
-`/api/cron/morning` (readiness/health sync + today's recommendation), `/api/cron/evening` (ledger, PR detection,
-missing-RPE nudges), `/api/cron/weekly` (weekly review). Each handler enqueues `sync_jobs` rows and processes them
-idempotently (unique `(user_id, kind, dedupe_key)`).
+One cron `/api/cron/daily` (03:30 UTC): for each user, dispatch by `users.timezone` and weekday — morning tasks daily
+(readiness/health sync placeholder, `recompute` today, week outlook), evening tasks folded into the next run (PR detection,
+missing-RPE nudges, ledger), weekly review when the athlete-local weekday is Sunday. `sync_jobs` rows are claimed with
+`FOR UPDATE SKIP LOCKED` + `lease_until`, re-queued with exponential backoff, failed after `max_attempts`; every enqueue site
+also calls `after(() => runJobsOnce())` so imports never wait for the cron.
 
-### Recompute triggers
-Any write that changes training state (completed workout, WOD analysed, readiness answered, intent declared, pain
-logged, calendar move) calls `recommendationService.recompute(userId, date)` — cheap because the engine is pure and the
-context assembly is a handful of indexed queries over the last 28 days.
+## 5. Data classification
 
-## 5. Data classification (what is measured vs declared vs estimated vs decided)
+| Class                 | Examples                                                                                                     | `source`                          | Storage                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------- | ----------------------------------------------------------- |
+| **Measured**          | Garmin activities, HR/pace/power streams, laps, sleep, RHR, HRV, Body Battery, scale readings, set timestamps | `GARMIN`, `DEVICE`, `SCALE`       | `activities*`, `recovery_metrics`, `body_compositions`, `raw_payloads` |
+| **Declared**          | RPE, feeling, readiness answers, pain, intents, WOD text, coach sessions, goals, availability, manual PRs      | `USER`, `MANUAL`                  | `workouts.rpe/feeling`, `daily_readiness`, `pain_logs`, `user_intents`, `wod_inbox_items`, `goals`… |
+| **Estimated**         | e1RM, HR zones from HRR, pace@HR, decoupling, EF, WOD credits/loads, intensity, comparable groups, parsed WOD  | `CALCULATED` (+version), `AI_PARSED`/`HEURISTIC` (+confidence) | `computed_metrics`, `workout_analyses`, `wod_inbox_items.analysis`, `personal_records.estimated` |
+| **Engine decisions**  | Recommendation, bonus, alternatives, reschedules, deload proposal, placement verdicts, weekly targets         | `ENGINE`                          | `recommendations`, `training_blocks(source=ENGINE)`, `weekly_stimulus_targets(source=ENGINE)` |
+| **AI decisions**      | Parsed WOD structure, parsed intent, explanation wording, fun suggestions, monthly narrative                  | `AI_PARSED`                       | `ai_invocations`; consumed only after Zod + Layer A          |
 
-| Class                 | Examples                                                                                   | `source`                        | Storage                                              |
-| --------------------- | ------------------------------------------------------------------------------------------ | ------------------------------- | ---------------------------------------------------- |
-| **Measured**          | Garmin activities, HR/pace/power streams, laps, sleep, RHR, HRV, Body Battery, scale readings, set timestamps | `GARMIN`, `SCALE`, `DEVICE`     | `activities`, `activity_*`, `recovery_metrics`, `body_compositions` + `raw_payloads` |
-| **Declared**          | RPE, fun score, readiness answers, pain, wishes/intents, WOD text, coach sessions, goals, availability, PR entered by hand | `USER`, `MANUAL`                | `workouts.rpe/fun_score`, `daily_readiness`, `pain_logs`, `user_intents`, `wod_inbox_items`, `goals`… |
-| **Estimated**         | e1RM, HR zones from HRR, pace@HR, decoupling, EF, WOD stimulus credits, load vectors, AI-parsed WOD structure, comparable groups | `CALCULATED` (+`algorithm_version`), `AI_PARSED` (+`confidence`) | `computed_metrics`, `wod_analyses`, `workout_stimuli`, `personal_records` (flagged `estimated`) |
-| **Engine decisions**  | Today recommendation, bonus, alternatives, deload flag, calendar-move warnings, weekly targets | `ENGINE`                        | `recommendations` (inputs snapshot, rules_triggered, output, explanation, confidence, engine_version) |
-| **AI decisions**      | Parsed WOD candidate, parsed intent, explanation wording, "surprise me" candidates, monthly narrative | `AI`                            | `ai_invocations` (prompt hash, model, schema version, validated output). Never written to plan tables directly. |
+UI marks estimated values with "≈" and never fakes precision (e1RM to 2.5 kg, trends over points, ranges when confidence is LOW).
 
-Rules: an AI output becomes usable only after (1) Zod schema validation, (2) Layer A validation/scoring. UI labels
-estimated values with a subtle "≈" marker and never shows a fake precision (e1RM rounded to 2.5 kg, trends over points).
+## 6. External APIs and who must approve what
 
-## 6. External APIs & dependencies (and who must approve what)
+| Integration                          | MVP 1 status              | Needs                                                                                                        |
+| ------------------------------------ | ------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Anthropic API                        | Optional (heuristic mock) | `ANTHROPIC_API_KEY` (user). Per-kind daily caps in `ai_invocations`; timeouts 30 s; no re-prompt loops       |
+| Supabase (Postgres + Auth + Storage) | Optional locally          | Project; **disable sign-ups**; `ALLOWED_EMAILS`; pooled `DATABASE_URL` (6543, `prepare:false`) + `DIRECT_DATABASE_URL` (5432) |
+| Vercel (+ Cron)                      | Deployment                | Hobby: 2 crons/day → `/api/cron/daily` only                                                                  |
+| **Garmin Developer Program**         | Mocked                    | **External approval required** (Health + Activity + Training APIs). OAuth 2.0 PKCE, public HTTPS callback. Endpoints implemented from the official docs only once credentials exist |
+| Garmin FIT SDK                       | Used                      | none                                                                                                         |
+| Withings / scale API                 | Manual provider           | Vendor developer registration once the scale brand is known                                                  |
+| Google Calendar API                  | Null provider             | Google Cloud OAuth consent screen (MVP 3)                                                                    |
+| Apple Calendar                       | Not planned               | No public API; CalDAV app password or Shortcuts webhook later                                                |
+| Box programming platforms            | Not planned               | Paste/photo is the stable path                                                                               |
 
-| Integration                         | Status for MVP 1 | Needs                                                                                     |
-| ----------------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
-| Anthropic API (WOD parser, coach)   | Optional (mock fallback) | `ANTHROPIC_API_KEY` (user)                                                        |
-| Supabase (Postgres + Auth + Storage)| Optional locally (PGlite + local auth) | Supabase project; on Vercel use pooled connection string           |
-| Vercel (+ Cron)                     | Deployment       | Vercel project; Hobby plan allows daily crons only → morning/evening/weekly fit            |
-| **Garmin Developer Program**        | Mocked           | **External approval required.** Apply for Health API + Activity API + Training API. OAuth 2.0 (PKCE). Push notifications require a public HTTPS callback. Endpoints are NOT invented here: implement `GarminOfficialProvider` against the official docs once credentials exist. |
-| Garmin FIT SDK (`@garmin/fitsdk`)   | Used             | none (npm)                                                                                |
-| Withings / other scale API          | Manual provider only | OAuth app registration on the vendor's developer portal once the scale brand is known |
-| Google Calendar API                 | Null provider    | Google Cloud OAuth consent screen (later)                                                 |
-| Apple Calendar                      | Not planned MVP  | No public third-party API; CalDAV with app-specific password or iOS Shortcuts webhook later |
-| Box programming platform (SugarWOD/Wodify/BTWB) | Not planned | Most have no public API; WOD Inbox (paste/photo) is the stable path             |
+## 7. Security, privacy, runtime constraints
 
-## 7. Security & privacy
+**Control model.** supabase-js is used for **Auth only**. All data access is Drizzle through a least-privilege role in
+`DATABASE_URL`; ownership is enforced in code by `scoped(db, userId)` (every user-owned query goes through it; a test greps
+for raw `db.select().from(userOwned)` outside `src/server/repo`). Every table calls `.enableRLS()` with **no policies** →
+deny-all for the public Data API even though the anon key ships in the client. A PGlite integration test asserts
+`relrowsecurity = true` for every table. `SUPABASE_SERVICE_ROLE_KEY` is imported only by `src/server/auth/admin.ts`.
 
-- All secrets server-only; no `NEXT_PUBLIC_` for anything sensitive.
-- Garmin/Withings tokens stored in `integrations.credentials_encrypted` (AES-GCM with `INTEGRATION_ENCRYPTION_KEY`), never in logs.
-- Row-level ownership: every user-owned table has `user_id`; services always filter on the authenticated user id.
-  (Supabase RLS policies are added when Supabase is provisioned; Drizzle access goes through the service role on the server.)
-- Data export (`/profile/data` → JSON zip) and deletion (cascade) are first-class services.
-- Logger redacts known PII keys; no raw physiological streams in logs.
+**Auth boundary.** `src/server/env.ts` (Zod, `server-only`): `AUTH_MODE` defaults to `supabase`; `local` is allowed only when
+`NODE_ENV !== "production" && !process.env.VERCEL`, else boot fails. `requireUser()` is the first line of every server action
+and route handler; services never trust a caller-supplied user id. `getCurrentUser()` upserts the `users` row lazily.
+`src/proxy.ts` refreshes the Supabase cookie and redirects unauthenticated page navigations (matcher excludes `/_next`,
+`/icons`, `/sw.js`, `/manifest.webmanifest`, `/offline`, `/api/cron/*`, `/api/health`). Sign-ups disabled in Supabase +
+`ALLOWED_EMAILS` allowlist as defence in depth. Cron secret compared in constant time and **fails closed** when unset.
+
+**Secrets & tokens.** All secrets server-only; `src/server/**` and `src/db/**` start with `import "server-only"`.
+Integration tokens (MVP 2): AES-256-GCM envelope `version || nonce || ciphertext || tag`, AAD `${userId}:${provider}`,
+`INTEGRATION_ENCRYPTION_KEY` (+ `_PREV` for rotation), `token_expires_at` + `refresh_lock_until` on `integrations`; errors sanitised.
+
+**Privacy lifecycle.** `user_id` FKs cascade. Storage keys `users/{userId}/{kind}/{sha256}.{ext}` in private buckets so deletion is
+a prefix delete. `deleteAccount`: revoke integrations → delete storage prefix → `DELETE FROM users` → `auth.admin.deleteUser`
+→ one audit line with the id only. `exportAccount` → JSON zip of every user-owned table + raw payload references. The service
+worker caches navigations per device only; logout posts `LOGOUT` (page cache cleared) after the outbox is flushed.
+Logger fields are a closed type (`userId`, ids, counts, durations, rule ids, error codes) — health values cannot be logged.
+
+**iOS standalone / Next 16.** Email+password or email OTP typed in-app (magic links open in Safari's separate storage silo);
+`navigator.storage.persist()` on first run; `wakeLock` on session screens; every non-tab route has an in-app back;
+uploads go through multipart Route Handlers (Server Actions cap at 1 MB and serialise per client); Web Push is MVP 2 and
+installed-app only.
 
 ## 8. Feature flags
 
-`src/server/flags.ts` reads `FLAG_*` env vars into a typed object. Flags: `garmin`, `aiCoach`, `bodyComp`,
-`advancedReadiness`, `experimentalMetrics`. UI hides entry points; services throw `FeatureDisabledError` when called.
+`src/server/flags.ts` reads `FLAG_*` env vars into a typed object: `garmin`, `aiCoach`, `bodyComp`, `advancedReadiness`,
+`experimentalMetrics`. UI hides entry points; services throw `FeatureDisabledError`. The WOD parser is not flag-gated: it is
+selected by `AI_PROVIDER` and always has the heuristic fallback.
 
-## 9. What is deliberately NOT built yet
+## 9. Deliberately not built yet
 
-- Multi-tenant concerns (billing, orgs). Single athlete, single timezone per profile.
-- Real-time collaboration, push notifications infra (Web Push added in MVP 2 with the morning job).
-- Garmin official provider, Withings, Google Calendar (interfaces + mocks exist; implementations gated by flags).
-- Drag & drop calendar (MVP 1 uses explicit "move to day" with engine check; DnD is a UI upgrade, not a data change).
+Multi-tenant concerns; real-time collaboration; Web Push; Garmin official provider, Withings, Google Calendar (interfaces +
+mocks exist); drag-and-drop calendar (MVP 1 uses "move to day" with `checkPlacement`); per-travel timezone (MVP 3).

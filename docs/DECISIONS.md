@@ -65,3 +65,48 @@ activities/health data from seed fixtures. `GarminOfficialProvider` is a stub th
 ## ADR-012 — No composite fitness score
 **Context.** Spec §19.
 **Decision.** Four transparent dashboards. Any composite is a documented, toggleable computed metric with a visible formula.
+
+## ADR-013 — Planned vs actual analyses, no denormalised credit table
+**Context.** Review finding: three overlapping analysis stores and no planned/actual distinction.
+**Decision.** One `workout_analyses` table keyed `(workout_id, phase ∈ {planned, actual})`. `wod_analyses` and `workout_stimuli` dropped;
+the ledger sums `actual` rows (today's fixed session may fall back to `planned`). Evolving taxonomies are `text` + Zod, not Postgres enums.
+
+## ADR-014 — Normalised engine scoring, metabolic hard budget
+**Context.** Simulation showed rest/mobility always winning and VO2 never proposed with the v1 formula; classes ate the hard budget.
+**Decision.** Every score term is bounded (coverage ≤ 15, interference ≤ 12, recovery term only for recovery candidates, fixed rule
+scales). "Hard" is computed by `classifyIntensity` on the metabolic axis; heavy strength is governed by muscular residual and a
+separate `heavyStrength7d ≤ 3`. `crossfit_conditioning` split into `crossfit_exposure` + `hi_conditioning`; low-frequency keys count
+over 14 days; `deriveWeeklyTargets` enforces Σ hard ≤ maxHard.
+
+## ADR-015 — Fixed class with unknown WOD uses a prior and reserves a hard slot
+**Decision.** `crossfit_generic` is generated only when a fixed class exists without a gated-in analysis (static prior, later the learned
+weekday prior). Analyses enter the engine only when confirmed or `parseConfidence ≥ 0.7` (0.5–0.7 blended, < 0.5 prior + `wod_review`).
+`FIXED_CLASS_RESERVE` protects today/tomorrow.
+
+## ADR-016 — Bonus sessions are gated on the bonus, capped weekly, never enabled by free time
+**Decision.** See ENGINE.md §7. `have_time` only widens availability. Output always carries `bonus: { kind: 'none', reason }` when refused.
+
+## ADR-017 — Engine answers the week and placement questions without persisting projections
+**Decision.** `projectWeek` and `checkPlacement` are pure entry points; the outlook is stored inside the recommendation row, real
+`workouts` rows are created only when the user pins a day or confirms a WOD. The engine never inserts workouts.
+
+## ADR-018 — Strength session is client-authoritative while in progress
+**Decision.** Client-generated ids, IndexedDB bundle, ordered event outbox to `POST /api/sync/strength`, `client_events` idempotency,
+autoload/rest/e1RM computed client-side from the domain layer. See ARCHITECTURE §4.
+
+## ADR-019 — Deny-all RLS on every table, least-privilege Drizzle role, `scoped()` repository
+**Decision.** `.enableRLS()` with no policies on all tables (Data API deny-all); app queries run as an application role through Drizzle;
+ownership enforced by `scoped(db, userId)`; service role only for `auth.admin.deleteUser`. Integration test asserts RLS on every table.
+
+## ADR-020 — PGlite is dev/test only; one daily cron; inline recompute
+**Decision.** `createDb()` throws without `DATABASE_URL` in production; postgres.js `{ prepare: false, max: 1 }` singleton on `globalThis`;
+`DIRECT_DATABASE_URL` for migrations. `/api/cron/daily` is the only cron (Hobby limit 2). User-triggered recompute runs inline and is
+awaited before revalidation; tails run in `after()`. `sync_jobs` is an idempotency + lease ledger processed synchronously.
+
+## ADR-021 — Auth fails closed; email/password or OTP only; `requireUser()` everywhere
+**Decision.** `AUTH_MODE` defaults to `supabase`; `local` only off-Vercel and off-production. Sign-ups disabled + `ALLOWED_EMAILS`.
+`requireUser()` first line of every action/route handler. `src/proxy.ts` refreshes cookies. No magic links / OAuth in MVP 1 (iOS standalone storage silo).
+
+## ADR-022 — Layer B outputs are structure-only and budgeted
+**Decision.** `NormalizedWod` is `.strict()` and carries no physiology; intents are bounded structs with fixed bonuses; `explain` is
+display-only with a post-check; per-kind daily caps and 30 s timeouts; identical inputs reuse the stored valid output.
