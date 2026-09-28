@@ -1,10 +1,36 @@
+import { redirect } from "next/navigation";
+import { getDb } from "@/db/client";
+import { getCurrentUser } from "@/server/auth";
+import { getTodayView } from "@/server/services/today.service";
+import { TodayScreen } from "@/components/today/today-screen";
+import { acceptOptionAction, declareIntentAction, startOptionAction } from "./actions";
+
+export const dynamic = "force-dynamic";
 export const metadata = { title: "Today" };
 
-export default function TodayPage() {
+export default async function TodayPage() {
+  const user = await getCurrentUser();
+  if (!user) redirect("/login?next=/today");
+  const db = await getDb();
+  const view = await getTodayView(db, user);
+  if (!view.onboardingDone) redirect("/onboarding/1");
   return (
-    <section className="py-6">
-      <h1 className="text-3xl font-semibold tracking-tight">Today</h1>
-      <p className="mt-2 text-fg-muted">Bientôt.</p>
-    </section>
+    <TodayScreen
+      view={view}
+      actions={{
+        declareIntent: async (kind, intensity) => {
+          "use server";
+          return declareIntentAction(kind, intensity);
+        },
+        acceptOption: async (id, option) => {
+          "use server";
+          return acceptOptionAction(id, option);
+        },
+        startOption: async (option) => {
+          "use server";
+          return startOptionAction(option, view.recommendationId);
+        },
+      }}
+    />
   );
 }

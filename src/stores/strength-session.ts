@@ -3,7 +3,15 @@
 import { create } from "zustand";
 import { persist, type StateStorage, createJSONStorage } from "zustand/middleware";
 import { get as idbGet, set as idbSet, del as idbDel } from "idb-keyval";
-import { QUALITY_TO_RPE, adjustRestForQuality, decideProgression, estimateOneRepMax, restSecondsFor, type SetQuality, type StrengthPrescription } from "@/domain/strength";
+import {
+  QUALITY_TO_RPE,
+  adjustRestForQuality,
+  decideProgression,
+  estimateOneRepMax,
+  restSecondsFor,
+  type SetQuality,
+  type StrengthPrescription,
+} from "@/domain/strength";
 import { newId } from "@/lib/ids";
 
 /**
@@ -21,7 +29,15 @@ export interface SessionExercise {
   order: number;
   prescription: StrengthPrescription;
   incrementKg: number;
-  lastExposure: { date: string; sets: Array<{ reps: number; weightKg: number; rpe?: number | null; quality?: SetQuality | null }> } | null;
+  lastExposure: {
+    date: string;
+    sets: Array<{
+      reps: number;
+      weightKg: number;
+      rpe?: number | null;
+      quality?: SetQuality | null;
+    }>;
+  } | null;
   bestE1rmKg: number | null;
   alternates: string[];
 }
@@ -39,7 +55,14 @@ export interface SessionSet {
   clientUpdatedAt: string;
 }
 
-export type OutboxEventType = "session_started" | "set_completed" | "set_updated" | "set_deleted" | "exercise_added" | "exercise_swapped" | "session_finished";
+export type OutboxEventType =
+  | "session_started"
+  | "set_completed"
+  | "set_updated"
+  | "set_deleted"
+  | "exercise_added"
+  | "exercise_swapped"
+  | "session_finished";
 
 export interface OutboxEvent {
   id: string;
@@ -74,7 +97,12 @@ interface Session {
   restEndsAt: number | null;
   restTotalSec: number;
   seq: number;
-  finish: { rpe: number | null; feeling: "great" | "good" | "meh" | "too_hard" | null; painReported: boolean; notes: string } | null;
+  finish: {
+    rpe: number | null;
+    feeling: "great" | "good" | "meh" | "too_hard" | null;
+    painReported: boolean;
+    notes: string;
+  } | null;
 }
 
 interface StrengthState {
@@ -91,11 +119,24 @@ interface StrengthState {
   setCurrentExercise: (index: number) => void;
   adjustWeight: (exerciseId: string, deltaKg: number) => void;
   setWeight: (exerciseId: string, kg: number) => void;
-  completeSet: (exerciseId: string, reps: number, weightKg: number, isWarmup?: boolean) => SessionSet;
+  completeSet: (
+    exerciseId: string,
+    reps: number,
+    weightKg: number,
+    isWarmup?: boolean,
+  ) => SessionSet;
   rateLastSet: (setId: string, quality: SetQuality) => void;
-  updateSet: (setId: string, patch: Partial<Pick<SessionSet, "reps" | "weightKg" | "rpe" | "quality">>) => void;
+  updateSet: (
+    setId: string,
+    patch: Partial<Pick<SessionSet, "reps" | "weightKg" | "rpe" | "quality">>,
+  ) => void;
   deleteSet: (setId: string) => void;
-  swapExercise: (exerciseId: string, newExerciseId: string, newName: string, incrementKg: number) => void;
+  swapExercise: (
+    exerciseId: string,
+    newExerciseId: string,
+    newName: string,
+    incrementKg: number,
+  ) => void;
   skipRest: () => void;
   extendRest: (sec: number) => void;
   finishSession: (finish: NonNullable<Session["finish"]>) => void;
@@ -136,8 +177,18 @@ export const useStrengthSession = create<StrengthState>()(
         const s = get().session;
         if (!s) return;
         const seq = s.seq + 1;
-        const ev: OutboxEvent = { id: newId(), workoutId: s.workoutId, seq, type, payload, at: nowIso() };
-        set((st) => ({ outbox: [...st.outbox, ev], session: st.session ? { ...st.session, seq } : st.session }));
+        const ev: OutboxEvent = {
+          id: newId(),
+          workoutId: s.workoutId,
+          seq,
+          type,
+          payload,
+          at: nowIso(),
+        };
+        set((st) => ({
+          outbox: [...st.outbox, ev],
+          session: st.session ? { ...st.session, seq } : st.session,
+        }));
       };
       return {
         hydrated: false,
@@ -166,24 +217,67 @@ export const useStrengthSession = create<StrengthState>()(
             finish: null,
           };
           set({ session });
-          push("session_started", { workoutId: bundle.workoutId, templateId: bundle.templateId, date: bundle.date, title: bundle.title, startedAt: session.startedAt, exercises: bundle.exercises.map((e) => ({ id: e.id, exerciseId: e.exerciseId, order: e.order, prescription: e.prescription })) });
+          push("session_started", {
+            workoutId: bundle.workoutId,
+            templateId: bundle.templateId,
+            date: bundle.date,
+            title: bundle.title,
+            startedAt: session.startedAt,
+            exercises: bundle.exercises.map((e) => ({
+              id: e.id,
+              exerciseId: e.exerciseId,
+              order: e.order,
+              prescription: e.prescription,
+            })),
+          });
         },
 
         resumeOrNull: () => get().session,
 
         clearSession: () => set({ session: null }),
 
-        setCurrentExercise: (index) => set((st) => (st.session ? { session: { ...st.session, currentExerciseIndex: Math.max(0, Math.min(index, st.session.exercises.length - 1)) } } : {})),
+        setCurrentExercise: (index) =>
+          set((st) =>
+            st.session
+              ? {
+                  session: {
+                    ...st.session,
+                    currentExerciseIndex: Math.max(
+                      0,
+                      Math.min(index, st.session.exercises.length - 1),
+                    ),
+                  },
+                }
+              : {},
+          ),
 
         adjustWeight: (exerciseId, deltaKg) =>
           set((st) => {
             if (!st.session) return {};
             const cur = st.session.workingWeightKg[exerciseId] ?? 0;
             const next = Math.max(0, Math.round((cur + deltaKg) * 2) / 2);
-            return { session: { ...st.session, workingWeightKg: { ...st.session.workingWeightKg, [exerciseId]: next } } };
+            return {
+              session: {
+                ...st.session,
+                workingWeightKg: { ...st.session.workingWeightKg, [exerciseId]: next },
+              },
+            };
           }),
 
-        setWeight: (exerciseId, kg) => set((st) => (st.session ? { session: { ...st.session, workingWeightKg: { ...st.session.workingWeightKg, [exerciseId]: Math.max(0, kg) } } } : {})),
+        setWeight: (exerciseId, kg) =>
+          set((st) =>
+            st.session
+              ? {
+                  session: {
+                    ...st.session,
+                    workingWeightKg: {
+                      ...st.session.workingWeightKg,
+                      [exerciseId]: Math.max(0, kg),
+                    },
+                  },
+                }
+              : {},
+          ),
 
         completeSet: (exerciseId, reps, weightKg, isWarmup = false) => {
           const st = get();
@@ -192,11 +286,36 @@ export const useStrengthSession = create<StrengthState>()(
           const ex = s.exercises.find((e) => e.id === exerciseId);
           const existing = s.sets.filter((x) => x.exerciseId === exerciseId && !x.isWarmup).length;
           const setIndex = isWarmup ? 0 : existing + 1;
-          const record: SessionSet = { id: newId(), exerciseId, setIndex, reps, weightKg, quality: null, rpe: null, isWarmup, completedAt: nowIso(), clientUpdatedAt: nowIso() };
+          const record: SessionSet = {
+            id: newId(),
+            exerciseId,
+            setIndex,
+            reps,
+            weightKg,
+            quality: null,
+            rpe: null,
+            isWarmup,
+            completedAt: nowIso(),
+            clientUpdatedAt: nowIso(),
+          };
           const intent = ex?.prescription.intent ?? "strength";
           const restSec = restSecondsFor(intent, ex?.prescription.restSec ?? null);
-          set({ session: { ...s, sets: [...s.sets, record], restEndsAt: isWarmup ? null : Date.now() + restSec * 1000, restTotalSec: isWarmup ? 0 : restSec } });
-          push("set_completed", { set: { ...record, exerciseId: ex?.exerciseId ?? null, workoutExerciseId: exerciseId, e1rmKg: !isWarmup ? estimateOneRepMax(weightKg, reps) : null } });
+          set({
+            session: {
+              ...s,
+              sets: [...s.sets, record],
+              restEndsAt: isWarmup ? null : Date.now() + restSec * 1000,
+              restTotalSec: isWarmup ? 0 : restSec,
+            },
+          });
+          push("set_completed", {
+            set: {
+              ...record,
+              exerciseId: ex?.exerciseId ?? null,
+              workoutExerciseId: exerciseId,
+              e1rmKg: !isWarmup ? estimateOneRepMax(weightKg, reps) : null,
+            },
+          });
           return record;
         },
 
@@ -210,11 +329,13 @@ export const useStrengthSession = create<StrengthState>()(
           const intent = ex?.prescription.intent ?? "strength";
           const base = s.restTotalSec || restSecondsFor(intent, ex?.prescription.restSec ?? null);
           const adjusted = adjustRestForQuality(base, intent, quality);
-          const elapsed = s.restEndsAt ? (s.restEndsAt - Date.now()) : 0;
+          const elapsed = s.restEndsAt ? s.restEndsAt - Date.now() : 0;
           const restEndsAt = s.restEndsAt ? s.restEndsAt + (adjusted - base) * 1000 : null;
           void elapsed;
           const rpe = QUALITY_TO_RPE[quality];
-          const sets = s.sets.map((x) => (x.id === setId ? { ...x, quality, rpe, clientUpdatedAt: nowIso() } : x));
+          const sets = s.sets.map((x) =>
+            x.id === setId ? { ...x, quality, rpe, clientUpdatedAt: nowIso() } : x,
+          );
           set({ session: { ...s, sets, restEndsAt, restTotalSec: adjusted } });
           push("set_updated", { setId, quality, rpe, clientUpdatedAt: nowIso() });
         },
@@ -222,7 +343,9 @@ export const useStrengthSession = create<StrengthState>()(
         updateSet: (setId, patch) => {
           const s = get().session;
           if (!s) return;
-          const sets = s.sets.map((x) => (x.id === setId ? { ...x, ...patch, clientUpdatedAt: nowIso() } : x));
+          const sets = s.sets.map((x) =>
+            x.id === setId ? { ...x, ...patch, clientUpdatedAt: nowIso() } : x,
+          );
           set({ session: { ...s, sets } });
           push("set_updated", { setId, ...patch, clientUpdatedAt: nowIso() });
         },
@@ -245,21 +368,57 @@ export const useStrengthSession = create<StrengthState>()(
         swapExercise: (exerciseId, newExerciseId, newName, incrementKg) => {
           const s = get().session;
           if (!s) return;
-          const exercises = s.exercises.map((e) => (e.id === exerciseId ? { ...e, exerciseId: newExerciseId, name: newName, incrementKg, lastExposure: null, bestE1rmKg: null } : e));
-          set({ session: { ...s, exercises, workingWeightKg: { ...s.workingWeightKg, [exerciseId]: null } } });
+          const exercises = s.exercises.map((e) =>
+            e.id === exerciseId
+              ? {
+                  ...e,
+                  exerciseId: newExerciseId,
+                  name: newName,
+                  incrementKg,
+                  lastExposure: null,
+                  bestE1rmKg: null,
+                }
+              : e,
+          );
+          set({
+            session: {
+              ...s,
+              exercises,
+              workingWeightKg: { ...s.workingWeightKg, [exerciseId]: null },
+            },
+          });
           push("exercise_swapped", { workoutExerciseId: exerciseId, exerciseId: newExerciseId });
         },
 
-        skipRest: () => set((st) => (st.session ? { session: { ...st.session, restEndsAt: null } } : {})),
+        skipRest: () =>
+          set((st) => (st.session ? { session: { ...st.session, restEndsAt: null } } : {})),
 
-        extendRest: (sec) => set((st) => (st.session && st.session.restEndsAt ? { session: { ...st.session, restEndsAt: st.session.restEndsAt + sec * 1000, restTotalSec: st.session.restTotalSec + sec } } : {})),
+        extendRest: (sec) =>
+          set((st) =>
+            st.session && st.session.restEndsAt
+              ? {
+                  session: {
+                    ...st.session,
+                    restEndsAt: st.session.restEndsAt + sec * 1000,
+                    restTotalSec: st.session.restTotalSec + sec,
+                  },
+                }
+              : {},
+          ),
 
         finishSession: (finish) => {
           const s = get().session;
           if (!s) return;
           const finishedAt = nowIso();
           set({ session: { ...s, finishedAt, finish, restEndsAt: null } });
-          push("session_finished", { finishedAt, ...finish, durationMin: Math.max(1, Math.round((Date.parse(finishedAt) - Date.parse(s.startedAt)) / 60000)) });
+          push("session_finished", {
+            finishedAt,
+            ...finish,
+            durationMin: Math.max(
+              1,
+              Math.round((Date.parse(finishedAt) - Date.parse(s.startedAt)) / 60000),
+            ),
+          });
         },
 
         flushOutbox: async () => {
@@ -269,7 +428,11 @@ export const useStrengthSession = create<StrengthState>()(
           set({ flushing: true, lastFlushError: null });
           try {
             const batch = st.outbox.slice(0, 50);
-            const res = await fetch("/api/sync/strength", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ events: batch }) });
+            const res = await fetch("/api/sync/strength", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ events: batch }),
+            });
             if (res.status === 401) {
               set({ lastFlushError: "auth" });
               return;
