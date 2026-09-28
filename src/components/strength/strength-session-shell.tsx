@@ -49,6 +49,14 @@ export function StrengthSessionShell({
     };
   }, [bundle, workoutId]);
 
+  // Ask the service worker to precache this shell (and its return routes) for cold offline starts.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    const ctrl = navigator.serviceWorker.controller;
+    if (!ctrl) return;
+    ctrl.postMessage({ type: "PRECACHE", urls: [window.location.pathname, "/today", "/offline"] });
+  }, [workoutId]);
+
   // Timer tick + flush on visibility/online (ARCHITECTURE §4).
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 500);

@@ -85,6 +85,44 @@ export async function bestE1rmsByExercise(db: Db, userId: string): Promise<Recor
     .groupBy(strengthSets.exerciseId);
   const out: Record<string, number> = {};
   for (const r of rows) if (r.best != null) out[r.exerciseId] = Number(r.best);
+  // Declared PRs (onboarding "niveau / PR") seed exercises without any logged set — never override
+  // a measured e1RM (spec §70: declared ≠ measured).
+  for (const [exerciseId, kg] of Object.entries(await declaredE1rms(db, userId)))
+    if (out[exerciseId] == null) out[exerciseId] = kg;
+  return out;
+}
+
+/** Declared 1RM / e1RM records (`personal_records`, source USER or CALCULATED) as an e1RM per exercise. */
+async function declaredE1rms(
+  db: Db,
+  userId: string,
+  exerciseIds?: string[],
+): Promise<Record<string, number>> {
+  if (exerciseIds && exerciseIds.length === 0) return {};
+  const rows = await db
+    .select({
+      exerciseId: personalRecords.exerciseId,
+      kind: personalRecords.kind,
+      value: personalRecords.value,
+      reps: personalRecords.reps,
+    })
+    .from(personalRecords)
+    .where(
+      and(
+        eq(personalRecords.userId, userId),
+        eq(personalRecords.superseded, false),
+        inArray(personalRecords.kind, ["weight", "e1rm"]),
+        sql`${personalRecords.exerciseId} is not null`,
+        ...(exerciseIds ? [inArray(personalRecords.exerciseId, exerciseIds)] : []),
+      ),
+    );
+  const out: Record<string, number> = {};
+  for (const r of rows) {
+    if (!r.exerciseId) continue;
+    const e1rm = r.kind === "e1rm" ? r.value : (estimateOneRepMax(r.value, r.reps ?? 1) ?? r.value);
+    if (out[r.exerciseId] == null || e1rm > (out[r.exerciseId] as number))
+      out[r.exerciseId] = Math.round(e1rm * 2) / 2;
+  }
   return out;
 }
 
@@ -127,6 +165,7 @@ export async function getStrengthBundle(
         .limit(400)
     : [];
   const template = w.templateId ? STRENGTH_TEMPLATES.find((t) => t.id === w.templateId) : undefined;
+  const declared = await declaredE1rms(db, userId, exerciseIds);
   const exercises: StrengthBundleExercise[] = exRows.map((e) => {
     const sets = history.filter((s) => s.exerciseId === e.exerciseId);
     const lastDate = sets[0]?.date ?? null;
@@ -166,7 +205,7 @@ export async function getStrengthBundle(
       prescription,
       incrementKg: incrementFor(e.exerciseId, prefs),
       lastExposure: lastDate ? { date: lastDate, sets: lastSets.reverse() } : null,
-      bestE1rmKg: best?.e1rmKg ?? null,
+      bestE1rmKg: best?.e1rmKg ?? declared[e.exerciseId] ?? null,
       alternates: template?.exercises.find((t) => t.exerciseId === e.exerciseId)?.alternates ?? [],
     };
   });
@@ -206,19 +245,17 @@ export async function createStrengthWorkoutFromTemplate(
     })
     .returning({ id: workouts.id });
   if (!w) throw new Error("workout insert failed");
-  await db
-    .insert(workoutExercises)
-    .values(
-      template.exercises.map((ex, i) => ({
-        userId,
-        workoutId: w.id,
-        date: opts.date,
-        order: i,
-        exerciseId: ex.exerciseId,
-        prescription: ex.prescription,
-        source: "ENGINE",
-      })),
-    );
+  await db.insert(workoutExercises).values(
+    template.exercises.map((ex, i) => ({
+      userId,
+      workoutId: w.id,
+      date: opts.date,
+      order: i,
+      exerciseId: ex.exerciseId,
+      prescription: ex.prescription,
+      source: "ENGINE",
+    })),
+  );
   const profile = profileOfKind(template.kind);
   await db
     .insert(workoutAnalyses)

@@ -6,7 +6,7 @@
  * Authenticated HTML is cached per-URL only in this device's cache and never shared; the cache is cleared on logout
  * via the "LOGOUT" message.
  */
-const VERSION = "v1";
+const VERSION = "v2";
 const STATIC_CACHE = `athleteos-static-${VERSION}`;
 const PAGE_CACHE = `athleteos-pages-${VERSION}`;
 const OFFLINE_URL = "/offline";
@@ -32,8 +32,24 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "LOGOUT") {
+  if (!event.data) return;
+  if (event.data.type === "LOGOUT") {
     event.waitUntil(caches.delete(PAGE_CACHE));
+  }
+  // The strength shell asks to be precached so a cold start works offline (ARCHITECTURE §4):
+  // the page HTML is fetched once more with credentials and stored per-URL in this device's cache.
+  if (event.data.type === "PRECACHE" && Array.isArray(event.data.urls)) {
+    event.waitUntil(
+      caches.open(PAGE_CACHE).then((cache) =>
+        Promise.all(
+          event.data.urls.map((u) =>
+            fetch(u, { credentials: "same-origin" })
+              .then((res) => (res.ok ? cache.put(u, res) : undefined))
+              .catch(() => undefined),
+          ),
+        ),
+      ),
+    );
   }
 });
 
