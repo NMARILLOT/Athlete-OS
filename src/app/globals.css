@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+/*
+ * Athlete OS design tokens.
+ * Dark-first, premium, athletic, minimal. Large touch targets. One-handed use.
+ */
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  --color-bg: #0b0d10;
+  --color-bg-elevated: #14181d;
+  --color-bg-muted: #1b2027;
+  --color-border: #242a33;
+  --color-border-strong: #313945;
+
+  --color-fg: #eef2f6;
+  --color-fg-muted: #9aa5b3;
+  --color-fg-subtle: #6b7684;
+
+  --color-accent: #6ee7b7; /* mint — go */
+  --color-accent-strong: #34d399;
+  --color-accent-fg: #06291c;
+
+  --color-warn: #fbbf24;
+  --color-danger: #f87171;
+  --color-info: #60a5fa;
+
+  --color-crossfit: #f472b6;
+  --color-strength: #a78bfa;
+  --color-cardio-easy: #34d399;
+  --color-cardio-hard: #fb923c;
+  --color-recovery: #60a5fa;
+  --color-coaching: #94a3b8;
+
+  --radius-xl: 1.25rem;
+  --radius-2xl: 1.75rem;
+
+  --shadow-card: 0 1px 0 0 rgb(255 255 255 / 0.03) inset, 0 8px 24px -12px rgb(0 0 0 / 0.6);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+body {
+  font-family: var(--font-sans);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* Utility: safe-area aware bottom navigation */
+.pb-safe {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* Hide scrollbars on horizontal scrollers */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

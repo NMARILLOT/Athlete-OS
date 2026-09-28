@@ -1,0 +1,6 @@
+.next
+node_modules
+drizzle
+coverage
+public/sw.js
+package-lock.json
