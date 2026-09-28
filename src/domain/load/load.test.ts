@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { emptyLoadVector } from "../core";
-import { DEFAULT_HALF_LIVES, fatigueBand, residualFatigue, scaleLoadVector, windowSum } from "./fatigue";
+import {
+  DEFAULT_HALF_LIVES,
+  fatigueBand,
+  residualFatigue,
+  scaleLoadVector,
+  windowSum,
+} from "./fatigue";
 import { dailyLoadSeries, summarizeLoad, trailingSum } from "./rolling";
 import { intensityFromRpe, sessionRpeLoad } from "./session-rpe";
 

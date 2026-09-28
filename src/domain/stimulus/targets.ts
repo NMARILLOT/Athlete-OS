@@ -1,4 +1,11 @@
-import { HARD_STIMULUS_KEYS, STIMULUS_KEY_VALUES, STIMULUS_WINDOW_DAYS, type BlockFocus, type GoalWeights, type StimulusKey } from "../core";
+import {
+  HARD_STIMULUS_KEYS,
+  STIMULUS_KEY_VALUES,
+  STIMULUS_WINDOW_DAYS,
+  type BlockFocus,
+  type GoalWeights,
+  type StimulusKey,
+} from "../core";
 import { DELOAD, WEEKLY_STRUCTURE } from "../athlete-model/defaults";
 import { normalizeGoalWeights } from "./affinity";
 
@@ -9,8 +16,8 @@ export type StimulusTargets = Record<StimulusKey, number>;
  * 7-day keys are "per week", 14-day keys are "per two weeks".
  */
 export const DEFAULT_TARGETS: StimulusTargets = {
-  strength_lower: 2,
-  strength_upper: 2,
+  strength_lower: 1.5,
+  strength_upper: 1.5,
   hypertrophy: 1,
   olympic_technique: 1,
   gymnastics_skill: 1,
@@ -25,10 +32,33 @@ export const DEFAULT_TARGETS: StimulusTargets = {
 };
 
 const BLOCK_MULTIPLIERS: Record<BlockFocus, Partial<StimulusTargets>> = {
-  base: { aerobic_easy: 1.3, aerobic_long: 1.3, hi_conditioning: 0.75, vo2max: 0.75, strength_lower: 1, strength_upper: 1 },
+  base: {
+    aerobic_easy: 1.3,
+    aerobic_long: 1.3,
+    hi_conditioning: 0.75,
+    vo2max: 0.75,
+    strength_lower: 1,
+    strength_upper: 1,
+  },
   build: { threshold: 1.5, strength_lower: 1.2, strength_upper: 1.2, aerobic_easy: 1.1 },
-  performance: { crossfit_exposure: 1.3, hi_conditioning: 1.2, vo2max: 1.2, olympic_technique: 1.2, gymnastics_skill: 1.2, aerobic_long: 0.8 },
-  recovery: { strength_lower: 0.6, strength_upper: 0.6, hypertrophy: 0.6, hi_conditioning: 0.5, threshold: 0.5, vo2max: 0.5, aerobic_easy: 0.8, mobility_recovery: 1.5 },
+  performance: {
+    crossfit_exposure: 1.3,
+    hi_conditioning: 1.2,
+    vo2max: 1.2,
+    olympic_technique: 1.2,
+    gymnastics_skill: 1.2,
+    aerobic_long: 0.8,
+  },
+  recovery: {
+    strength_lower: 0.6,
+    strength_upper: 0.6,
+    hypertrophy: 0.6,
+    hi_conditioning: 0.5,
+    threshold: 0.5,
+    vo2max: 0.5,
+    aerobic_easy: 0.8,
+    mobility_recovery: 1.5,
+  },
   custom: {},
 };
 
@@ -99,7 +129,9 @@ export function deriveWeeklyTargets(input: DeriveTargetsInput): StimulusTargets 
     }
   }
 
-  for (const [k, v] of Object.entries(input.overrides ?? {}) as Array<[StimulusKey, number | undefined]>) {
+  for (const [k, v] of Object.entries(input.overrides ?? {}) as Array<
+    [StimulusKey, number | undefined]
+  >) {
     if (typeof v === "number" && v >= 0) out[k] = v;
   }
 

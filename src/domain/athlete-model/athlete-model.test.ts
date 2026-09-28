@@ -1,9 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { buildAthleteModel, computeBaseline, deviationFrom, DEFAULT_HALF_LIVES_H, DEFAULT_TOLERANCE } from "./index";
+import {
+  buildAthleteModel,
+  computeBaseline,
+  deviationFrom,
+  DEFAULT_HALF_LIVES_H,
+  DEFAULT_TOLERANCE,
+} from "./index";
 
 describe("athlete model", () => {
   it("merges learned overrides over defaults", () => {
-    const m = buildAthleteModel({ "fatigue_half_life.muscular_lower": 42, "exercise_cost.wall_ball": 1.4, "tolerance.impact": 3.5, "junk.x": 1 });
+    const m = buildAthleteModel({
+      "fatigue_half_life.muscular_lower": 42,
+      "exercise_cost.wall_ball": 1.4,
+      "tolerance.impact": 3.5,
+      "junk.x": 1,
+    });
     expect(m.halfLivesH.muscular_lower).toBe(42);
     expect(m.halfLivesH.cardiovascular).toBe(DEFAULT_HALF_LIVES_H.cardiovascular);
     expect(m.tolerance.impact).toBe(3.5);

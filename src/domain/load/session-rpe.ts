@@ -11,7 +11,9 @@ export function sessionRpeLoad(durationMin: number, rpe: number | null | undefin
 }
 
 /** Intensity band from RPE (used when a session has no explicit band). */
-export function intensityFromRpe(rpe: number | null | undefined): "easy" | "moderate" | "hard" | null {
+export function intensityFromRpe(
+  rpe: number | null | undefined,
+): "easy" | "moderate" | "hard" | null {
   if (rpe == null) return null;
   if (rpe <= 4.5) return "easy";
   if (rpe <= 6.5) return "moderate";

@@ -48,13 +48,37 @@ interface Draft {
 }
 
 function newDraft(): Draft {
-  return { kind: null, format: null, title: null, durationMin: null, timeCapMin: null, rounds: null, repScheme: null, intervalSec: null, restSec: null, sets: null, reps: null, movements: [], notes: [], loadQualifier: null, alternating: false };
+  return {
+    kind: null,
+    format: null,
+    title: null,
+    durationMin: null,
+    timeCapMin: null,
+    rounds: null,
+    repScheme: null,
+    intervalSec: null,
+    restSec: null,
+    sets: null,
+    reps: null,
+    movements: [],
+    notes: [],
+    loadQualifier: null,
+    alternating: false,
+  };
 }
 
 /** Headers that open a NEW part when movements already exist. */
-const NEW_PART_FORMATS = new Set<WodFormat>(["amrap", "emom", "for_time", "tabata", "chipper", "intervals"]);
+const NEW_PART_FORMATS = new Set<WodFormat>([
+  "amrap",
+  "emom",
+  "for_time",
+  "tabata",
+  "chipper",
+  "intervals",
+]);
 
-const SEPARATOR_LINE = /^(?:puis|then|and then|ensuite|après|apres|rest as needed|-+|=+|\*+|_+)\s*:?\s*$/i;
+const SEPARATOR_LINE =
+  /^(?:puis|then|and then|ensuite|après|apres|rest as needed|-+|=+|\*+|_+)\s*:?\s*$/i;
 
 function num(s: string | undefined): number | null {
   if (!s) return null;
@@ -71,10 +95,14 @@ function extractLoad(text: string): { load: WodLoad | null; rest: string } {
     load = { value: Number(pct[1]), unit: "percent_1rm", alt: null, qualifier: null };
     rest = rest.replace(pct[0], " ");
   }
-  const kg = /(?:@\s*)?\(?\s*(\d+(?:[.,]\d+)?)\s*(?:\/\s*(\d+(?:[.,]\d+)?))?\s*(kg|kgs|kilos?|lbs?|#|pood)\s*\)?/i.exec(rest);
+  const kg =
+    /(?:@\s*)?\(?\s*(\d+(?:[.,]\d+)?)\s*(?:\/\s*(\d+(?:[.,]\d+)?))?\s*(kg|kgs|kilos?|lbs?|#|pood)\s*\)?/i.exec(
+      rest,
+    );
   if (!load && kg) {
     const unitRaw = (kg[3] ?? "").toLowerCase();
-    const unit: WodLoad["unit"] = unitRaw.startsWith("lb") || unitRaw === "#" ? "lb" : unitRaw === "pood" ? "pood" : "kg";
+    const unit: WodLoad["unit"] =
+      unitRaw.startsWith("lb") || unitRaw === "#" ? "lb" : unitRaw === "pood" ? "pood" : "kg";
     load = { value: num(kg[1]) ?? 0, unit, alt: num(kg[2]), qualifier: null };
     rest = rest.replace(kg[0], " ");
   }
@@ -88,10 +116,18 @@ function extractLoad(text: string): { load: WodLoad | null; rest: string } {
       rest = rest.replace(pair[0], " ");
     }
   }
-  const qual = /\b(heavy|lourd|light|léger|leger|moderate|modéré|modere|build(?:\s+to)?|montée)\b/i.exec(rest);
+  const qual =
+    /\b(heavy|lourd|light|léger|leger|moderate|modéré|modere|build(?:\s+to)?|montée)\b/i.exec(rest);
   if (qual) {
     const q = qual[1]!.toLowerCase();
-    const qualifier: WodLoad["qualifier"] = q.startsWith("heav") || q === "lourd" ? "heavy" : q.startsWith("light") || q.startsWith("l") ? "light" : q.startsWith("build") || q.startsWith("mont") ? "build" : "moderate";
+    const qualifier: WodLoad["qualifier"] =
+      q.startsWith("heav") || q === "lourd"
+        ? "heavy"
+        : q.startsWith("light") || q.startsWith("l")
+          ? "light"
+          : q.startsWith("build") || q.startsWith("mont")
+            ? "build"
+            : "moderate";
     load = load ? { ...load, qualifier } : { value: 0, unit: "kg", alt: null, qualifier };
     rest = rest.replace(qual[0], " ");
   }
@@ -99,7 +135,10 @@ function extractLoad(text: string): { load: WodLoad | null; rest: string } {
 }
 
 function parseMovementLine(line: string, ctx: Draft): WodMovement | null {
-  let text = line.replace(/^[-•*·]\s*/, "").replace(/^(?:min(?:ute)?\s*)?\d+\s*[).:-]\s+(?=[a-zA-Z0-9éèêàç])/i, "").trim();
+  let text = line
+    .replace(/^[-•*·]\s*/, "")
+    .replace(/^(?:min(?:ute)?\s*)?\d+\s*[).:-]\s+(?=[a-zA-Z0-9éèêàç])/i, "")
+    .trim();
   if (!text) return null;
   const modifiers: string[] = [];
   const { load, rest } = extractLoad(text);
@@ -168,10 +207,14 @@ function parseMovementLine(line: string, ctx: Draft): WodMovement | null {
     }
   }
   let pace: WodMovement["pace"] = null;
-  if (/\b(easy|facile|recovery|récup|recup|z1|z2|zone ?2|conversational|souple)\b/i.test(text)) pace = "easy";
+  if (/\b(easy|facile|recovery|récup|recup|z1|z2|zone ?2|conversational|souple)\b/i.test(text))
+    pace = "easy";
   else if (/\b(sprint|max effort|all out|à fond|a fond|hard|fast)\b/i.test(text)) pace = "hard";
   else if (/\b(moderate|modéré|modere|tempo|steady)\b/i.test(text)) pace = "moderate";
-  text = text.replace(/\b(easy|facile|recovery|récup|recup|z1|z2|zone ?2|conversational|souple|sprint|max effort|all out|à fond|a fond|fast|steady|tempo)\b/gi, " ");
+  text = text.replace(
+    /\b(easy|facile|recovery|récup|recup|z1|z2|zone ?2|conversational|souple|sprint|max effort|all out|à fond|a fond|fast|steady|tempo)\b/gi,
+    " ",
+  );
   for (const [re, mod] of [
     [/\b(alternating|alt\.?|altern[ée]s?)\b/i, "alternating"],
     [/\b(each side|per side|par côté|par cote|e\/s|\/side)\b/i, "each_side"],
@@ -185,7 +228,10 @@ function parseMovementLine(line: string, ctx: Draft): WodMovement | null {
       text = text.replace(re, " ");
     }
   }
-  const name = text.replace(/[():@,]+/g, " ").replace(/\s+/g, " ").trim();
+  const name = text
+    .replace(/[():@,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!name) return null;
 
   const resolved = resolveExercise(name);
@@ -230,13 +276,24 @@ function parseHeader(line: string, d: Draft): boolean {
   let m: RegExpExecArray | null;
   const capInline = /\b(?:cap|time\s*cap|tc)\s*:?\s*(\d+)/i.exec(l);
   if (capInline && !/^(?:time\s*cap|cap|tc)\b/i.test(l)) d.timeCapMin = Number(capInline[1]);
-  if ((m = /^(?:amrap|as many (?:rounds|reps)[^\d]*)\s*(\d+)?\s*(?:min(?:utes?)?)?\b|^(\d+)\s*(?:min(?:utes?)?)\s*amrap/i.exec(l))) {
+  if (
+    (m =
+      /^(?:amrap|as many (?:rounds|reps)[^\d]*)\s*(\d+)?\s*(?:min(?:utes?)?)?\b|^(\d+)\s*(?:min(?:utes?)?)\s*amrap/i.exec(
+        l,
+      ))
+  ) {
     d.format = "amrap";
     d.durationMin = num(m[1] ?? m[2]);
     d.kind ??= "metcon";
     return true;
   }
-  if ((m = /^(?:e(\d*)mom|every\s*(\d+)?\s*(min(?:utes?)?|s|sec)?\s*(?:on the minute)?)\s*(?:for|x|pour)?\s*(\d+)?\s*(?:min(?:utes?)?|rounds?)?/i.exec(l)) && /emom|every/i.test(l)) {
+  if (
+    (m =
+      /^(?:e(\d*)mom|every\s*(\d+)?\s*(min(?:utes?)?|s|sec)?\s*(?:on the minute)?)\s*(?:for|x|pour)?\s*(\d+)?\s*(?:min(?:utes?)?|rounds?)?/i.exec(
+        l,
+      )) &&
+    /emom|every/i.test(l)
+  ) {
     d.format = "emom";
     d.kind ??= "metcon";
     if (/altern/i.test(l)) d.alternating = true;
@@ -245,12 +302,17 @@ function parseHeader(line: string, d: Draft): boolean {
     d.intervalSec = everyN * unitSec;
     const total = num(m[4]);
     if (total) {
-      if (/rounds?/i.test(l)) { d.rounds = total; d.durationMin = (total * d.intervalSec) / 60; }
-      else d.durationMin = total;
+      if (/rounds?/i.test(l)) {
+        d.rounds = total;
+        d.durationMin = (total * d.intervalSec) / 60;
+      } else d.durationMin = total;
     }
     return true;
   }
-  if ((m = /^(\d+)\s*(?:rounds?|rds?|tours?)\s*(?:for time|ft)?/i.exec(l)) || (m = /^(\d+)\s*rft\b/i.exec(l))) {
+  if (
+    (m = /^(\d+)\s*(?:rounds?|rds?|tours?)\s*(?:for time|ft)?/i.exec(l)) ||
+    (m = /^(\d+)\s*rft\b/i.exec(l))
+  ) {
     d.format = "for_time";
     d.rounds = Number(m[1]);
     d.kind ??= "metcon";
@@ -285,23 +347,35 @@ function parseHeader(line: string, d: Draft): boolean {
     d.restSec = /^m/i.test(m[2]!) ? v * 60 : v;
     return true;
   }
-  if ((m = /^(\d+)\s*[x×]\s*(\d+)\s*(heavy|lourd|light|léger|leger|moderate|modéré|modere|build|@\s*\d+\s*%)?\s*$/i.exec(l))) {
+  if (
+    (m =
+      /^(\d+)\s*[x×]\s*(\d+)\s*(heavy|lourd|light|léger|leger|moderate|modéré|modere|build|@\s*\d+\s*%)?\s*$/i.exec(
+        l,
+      ))
+  ) {
     d.format = "sets_reps";
     d.sets = Number(m[1]);
     d.reps = Number(m[2]);
     d.kind ??= "strength";
     const q = (m[3] ?? "").toLowerCase();
     if (q.startsWith("heav") || q === "lourd") d.loadQualifier = "heavy";
-    else if (q.startsWith("light") || q.startsWith("l")) d.loadQualifier = q ? "light" : d.loadQualifier;
+    else if (q.startsWith("light") || q.startsWith("l"))
+      d.loadQualifier = q ? "light" : d.loadQualifier;
     else if (q.startsWith("build")) d.loadQualifier = "build";
     else if (q.startsWith("mod")) d.loadQualifier = "moderate";
     if (q.includes("%")) {
       const pct = Number(/(\d+)/.exec(q)?.[1]);
-      for (const mv of d.movements) if (!mv.load) mv.load = { value: pct, unit: "percent_1rm", alt: null, qualifier: null };
+      for (const mv of d.movements)
+        if (!mv.load) mv.load = { value: pct, unit: "percent_1rm", alt: null, qualifier: null };
     }
     return true;
   }
-  if ((m = /^(?:build|monter|work up)\s*(?:to|à|a)?\s*(?:a\s*)?(?:heavy\s*)?(\d+)\s*(?:rm|rep max)?/i.exec(l))) {
+  if (
+    (m =
+      /^(?:build|monter|work up)\s*(?:to|à|a)?\s*(?:a\s*)?(?:heavy\s*)?(\d+)\s*(?:rm|rep max)?/i.exec(
+        l,
+      ))
+  ) {
     d.format = "sets_reps";
     d.sets = 5;
     d.reps = Number(m[1]);
@@ -320,9 +394,18 @@ function finalize(d: Draft): WodPart | null {
       else if (!mv.load.qualifier) mv.load = { ...mv.load, qualifier: d.loadQualifier };
     }
   }
-  const kind: WodPartKind = d.kind ?? (d.format === "sets_reps" || d.movements.every((m) => m.sets != null) ? "strength" : "metcon");
-  let format: WodFormat = d.format ?? (kind === "strength" ? "sets_reps" : d.repScheme ? "for_time" : "not_timed");
-  if (kind === "metcon" && format === "not_timed" && d.movements.length > 0 && d.movements.some((m) => m.reps != null)) format = "for_time";
+  const kind: WodPartKind =
+    d.kind ??
+    (d.format === "sets_reps" || d.movements.every((m) => m.sets != null) ? "strength" : "metcon");
+  let format: WodFormat =
+    d.format ?? (kind === "strength" ? "sets_reps" : d.repScheme ? "for_time" : "not_timed");
+  if (
+    kind === "metcon" &&
+    format === "not_timed" &&
+    d.movements.length > 0 &&
+    d.movements.some((m) => m.reps != null)
+  )
+    format = "for_time";
   if (format === "sets_reps" && d.sets == null) {
     const withSets = d.movements.find((m) => m.sets != null);
     if (withSets) {
@@ -381,7 +464,10 @@ export function parseWodText(sourceText: string): NormalizedWod {
     for (const [re, kind] of HEADER_KIND) {
       if (re.test(remainder)) {
         kindFromHeader = kind;
-        remainder = remainder.replace(re, "").replace(/^[\s:—–-]+/, "").trim();
+        remainder = remainder
+          .replace(re, "")
+          .replace(/^[\s:—–-]+/, "")
+          .trim();
         break;
       }
     }
@@ -393,7 +479,15 @@ export function parseWodText(sourceText: string): NormalizedWod {
     }
 
     // Benchmark-style title line: quoted or all-caps single word before the workout ("Fran", "\"Helen\"")
-    if (!title && parts.length === 0 && d.movements.length === 0 && /^["“«]?[A-Z][a-zA-Z' ]{2,24}["”»]?$/.test(line) && !parseHeader(line, d) && !/\d/.test(line) && !resolveExercise(line)) {
+    if (
+      !title &&
+      parts.length === 0 &&
+      d.movements.length === 0 &&
+      /^["“«]?[A-Z][a-zA-Z' ]{2,24}["”»]?$/.test(line) &&
+      !parseHeader(line, d) &&
+      !/\d/.test(line) &&
+      !resolveExercise(line)
+    ) {
       title = line.replace(/["“”«»]/g, "").trim();
       continue;
     }
@@ -422,7 +516,12 @@ export function parseWodText(sourceText: string): NormalizedWod {
       if (parseHeader(line, probe)) {
         if (d.movements.length && probe.format && NEW_PART_FORMATS.has(probe.format)) {
           flush();
-        } else if (d.movements.length && probe.format === "sets_reps" && d.format && d.format !== "sets_reps") {
+        } else if (
+          d.movements.length &&
+          probe.format === "sets_reps" &&
+          d.format &&
+          d.format !== "sets_reps"
+        ) {
           flush();
         }
         parseHeader(line, d);
@@ -430,17 +529,30 @@ export function parseWodText(sourceText: string): NormalizedWod {
       }
     }
     // A new sets×reps movement line after a metcon → new strength part (and vice versa)
-    if (d.format === "emom" && /^(?:min(?:ute)?\s*)?\d+\s*[).:-]\s+/i.test(line)) d.alternating = true;
+    if (d.format === "emom" && /^(?:min(?:ute)?\s*)?\d+\s*[).:-]\s+/i.test(line))
+      d.alternating = true;
     const mv = parseMovementLine(line, d);
     if (!mv) {
       d.notes.push(line);
       continue;
     }
     const isStrengthLine = mv.sets != null;
-    if (d.movements.length && d.format && ["amrap", "emom", "for_time", "tabata", "chipper"].includes(d.format) && isStrengthLine) {
+    if (
+      d.movements.length &&
+      d.format &&
+      ["amrap", "emom", "for_time", "tabata", "chipper"].includes(d.format) &&
+      isStrengthLine
+    ) {
       flush();
       d.kind = "strength";
-    } else if (d.movements.length && (d.format === "sets_reps" || (d.format == null && d.movements.every((m) => m.sets != null))) && !isStrengthLine && mv.reps != null && (mv.load == null || mv.load.qualifier == null)) {
+    } else if (
+      d.movements.length &&
+      (d.format === "sets_reps" ||
+        (d.format == null && d.movements.every((m) => m.sets != null))) &&
+      !isStrengthLine &&
+      mv.reps != null &&
+      (mv.load == null || mv.load.qualifier == null)
+    ) {
       // Uniform strength block continues when the movement also has sets; otherwise a new part starts.
       flush();
     }
@@ -464,7 +576,24 @@ export function parseWodText(sourceText: string): NormalizedWod {
       sets: null,
       reps: null,
       movements: [
-        { raw: sourceText.slice(0, 200) || "?", exerciseId: null, name: sourceText.slice(0, 120) || "?", resolutionConfidence: 0, hintedPattern: null, reps: null, repScheme: null, calories: null, caloriesAlt: null, distanceM: null, durationSec: null, heightCm: null, load: null, sets: null, modifiers: [], pace: null },
+        {
+          raw: sourceText.slice(0, 200) || "?",
+          exerciseId: null,
+          name: sourceText.slice(0, 120) || "?",
+          resolutionConfidence: 0,
+          hintedPattern: null,
+          reps: null,
+          repScheme: null,
+          calories: null,
+          caloriesAlt: null,
+          distanceM: null,
+          durationSec: null,
+          heightCm: null,
+          load: null,
+          sets: null,
+          modifiers: [],
+          pace: null,
+        },
       ],
       notes: null,
     });
@@ -473,7 +602,16 @@ export function parseWodText(sourceText: string): NormalizedWod {
   const movements = parts.flatMap((p) => p.movements);
   const unknown = movements.filter((m) => !m.exerciseId).length;
   const lowRes = movements.filter((m) => m.exerciseId && m.resolutionConfidence < 0.9).length;
-  const noQty = movements.filter((m) => m.reps == null && m.repScheme == null && m.calories == null && m.distanceM == null && m.durationSec == null && !(parts.find((p) => p.movements.includes(m))?.repScheme) && !(parts.find((p) => p.movements.includes(m))?.reps)).length;
+  const noQty = movements.filter(
+    (m) =>
+      m.reps == null &&
+      m.repScheme == null &&
+      m.calories == null &&
+      m.distanceM == null &&
+      m.durationSec == null &&
+      !parts.find((p) => p.movements.includes(m))?.repScheme &&
+      !parts.find((p) => p.movements.includes(m))?.reps,
+  ).length;
   let parseConfidence = 0.85 - 0.15 * unknown - 0.05 * lowRes - 0.1 * noQty;
   if (parts.some((p) => p.kind === "metcon" && p.format === "not_timed")) parseConfidence -= 0.1;
   parseConfidence = Math.max(0.1, Math.min(0.9, Math.round(parseConfidence * 100) / 100));

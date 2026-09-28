@@ -1,4 +1,9 @@
-import { DEFAULT_HALF_LIVES_H, DEFAULT_TOLERANCE, IMPACT_WEEKLY_TOLERANCE, DAILY_LOAD_CAP } from "./defaults";
+import {
+  DEFAULT_HALF_LIVES_H,
+  DEFAULT_TOLERANCE,
+  IMPACT_WEEKLY_TOLERANCE,
+  DAILY_LOAD_CAP,
+} from "./defaults";
 import type { AthleteModelParams } from "./types";
 
 export * from "./defaults";
@@ -17,8 +22,10 @@ export function buildAthleteModel(
     if (!Number.isFinite(value) || value <= 0) continue;
     const [group, name] = key.split(".") as [string, string | undefined];
     if (!name) continue;
-    if (group === "fatigue_half_life" && name in halfLivesH) halfLivesH[name as keyof typeof halfLivesH] = value;
-    else if (group === "tolerance" && name in tolerance) tolerance[name as keyof typeof tolerance] = value;
+    if (group === "fatigue_half_life" && name in halfLivesH)
+      halfLivesH[name as keyof typeof halfLivesH] = value;
+    else if (group === "tolerance" && name in tolerance)
+      tolerance[name as keyof typeof tolerance] = value;
     else if (group === "exercise_cost") exerciseCostMultipliers[name] = value;
   }
   const meanWeeklyImpactIU = context.meanWeeklyImpactIU ?? 0;
@@ -26,7 +33,13 @@ export function buildAthleteModel(
     halfLivesH,
     tolerance,
     exerciseCostMultipliers,
-    impactWeeklyToleranceIU: Math.max(IMPACT_WEEKLY_TOLERANCE.floorIU, IMPACT_WEEKLY_TOLERANCE.factor * meanWeeklyImpactIU),
-    meanDailyLoadAU: Math.max(DAILY_LOAD_CAP.minAU / DAILY_LOAD_CAP.factor, context.meanDailyLoadAU ?? 0),
+    impactWeeklyToleranceIU: Math.max(
+      IMPACT_WEEKLY_TOLERANCE.floorIU,
+      IMPACT_WEEKLY_TOLERANCE.factor * meanWeeklyImpactIU,
+    ),
+    meanDailyLoadAU: Math.max(
+      DAILY_LOAD_CAP.minAU / DAILY_LOAD_CAP.factor,
+      context.meanDailyLoadAU ?? 0,
+    ),
   };
 }

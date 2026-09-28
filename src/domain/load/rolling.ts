@@ -60,8 +60,14 @@ export function summarizeLoad(series: readonly DailyLoadPoint[]): LoadSummary {
     acute7d,
     chronic28d,
     chronicWeeklyAvg: Math.round(chronicWeeklyAvg),
-    ratio: chronicWeeklyAvg > 0 && daysAvailable >= 14 ? Math.round((acute7d / chronicWeeklyAvg) * 100) / 100 : null,
-    trend7dVsPrev7d: prev7.length === 7 && prev7Sum > 0 ? Math.round(((acute7d - prev7Sum) / prev7Sum) * 100) / 100 : null,
+    ratio:
+      chronicWeeklyAvg > 0 && daysAvailable >= 14
+        ? Math.round((acute7d / chronicWeeklyAvg) * 100) / 100
+        : null,
+    trend7dVsPrev7d:
+      prev7.length === 7 && prev7Sum > 0
+        ? Math.round(((acute7d - prev7Sum) / prev7Sum) * 100) / 100
+        : null,
   };
 }
 

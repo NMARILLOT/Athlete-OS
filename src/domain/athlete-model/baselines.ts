@@ -25,16 +25,34 @@ function sd(values: number[]): number | null {
 export function computeBaseline(
   metric: string,
   samples: readonly number[],
-  options: { windowDays?: number; minSamples?: number; useLog?: boolean; center?: "median" | "mean" } = {},
+  options: {
+    windowDays?: number;
+    minSamples?: number;
+    useLog?: boolean;
+    center?: "median" | "mean";
+  } = {},
 ): Baseline | null {
   const minSamples = options.minSamples ?? 7;
-  const values = samples.filter((v) => Number.isFinite(v)).map((v) => (options.useLog ? Math.log(v) : v));
+  const values = samples
+    .filter((v) => Number.isFinite(v))
+    .map((v) => (options.useLog ? Math.log(v) : v));
   if (values.length < minSamples) return null;
   const center = (options.center ?? "median") === "median" ? median(values) : mean(values);
-  return { metric, center, sd: sd(values), sampleCount: values.length, windowDays: options.windowDays ?? 28 };
+  return {
+    metric,
+    center,
+    sd: sd(values),
+    sampleCount: values.length,
+    windowDays: options.windowDays ?? 28,
+  };
 }
 
-export type Deviation = { direction: "above" | "below" | "normal"; delta: number; deltaPct: number; zScore: number | null };
+export type Deviation = {
+  direction: "above" | "below" | "normal";
+  delta: number;
+  deltaPct: number;
+  zScore: number | null;
+};
 
 export function deviationFrom(baseline: Baseline, value: number, useLog = false): Deviation {
   const v = useLog ? Math.log(value) : value;

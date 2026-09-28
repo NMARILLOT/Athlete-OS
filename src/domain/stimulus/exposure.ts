@@ -15,7 +15,10 @@ export interface ExposedSession {
 }
 
 /** Weighted pattern exposure over the last 72 h: today 1.0, yesterday 0.6, two days ago 0.3. */
-export function patternExposure72h(sessions: readonly ExposedSession[], today: IsoDate): PatternExposure {
+export function patternExposure72h(
+  sessions: readonly ExposedSession[],
+  today: IsoDate,
+): PatternExposure {
   const weights = [1, 0.6, 0.3];
   const out: PatternExposure = {};
   for (const s of sessions) {
@@ -77,22 +80,40 @@ function bars(value: number, ref: number): number {
   return Math.max(0, Math.min(5, Math.round((value / ref) * 5)));
 }
 
-export function weeklyPatternHeatmap(sessions: readonly ExposedSession[], from: IsoDate, to: IsoDate): HeatmapRow<MovementPattern>[] {
+export function weeklyPatternHeatmap(
+  sessions: readonly ExposedSession[],
+  from: IsoDate,
+  to: IsoDate,
+): HeatmapRow<MovementPattern>[] {
   const sum: PatternExposure = {};
   for (const s of sessions) {
     if (s.date < from || s.date > to) continue;
-    for (const [p, v] of Object.entries(s.patternExposure) as Array<[MovementPattern, number]>) sum[p] = (sum[p] ?? 0) + v;
+    for (const [p, v] of Object.entries(s.patternExposure) as Array<[MovementPattern, number]>)
+      sum[p] = (sum[p] ?? 0) + v;
   }
-  return MOVEMENT_PATTERN_VALUES.map((p) => ({ key: p, value: round2(sum[p] ?? 0), bars: bars(sum[p] ?? 0, PATTERN_REF[p]) }));
+  return MOVEMENT_PATTERN_VALUES.map((p) => ({
+    key: p,
+    value: round2(sum[p] ?? 0),
+    bars: bars(sum[p] ?? 0, PATTERN_REF[p]),
+  }));
 }
 
-export function weeklyMuscleHeatmap(sessions: readonly ExposedSession[], from: IsoDate, to: IsoDate): HeatmapRow<MuscleGroup>[] {
+export function weeklyMuscleHeatmap(
+  sessions: readonly ExposedSession[],
+  from: IsoDate,
+  to: IsoDate,
+): HeatmapRow<MuscleGroup>[] {
   const sum: MuscleExposure = {};
   for (const s of sessions) {
     if (s.date < from || s.date > to) continue;
-    for (const [m, v] of Object.entries(s.muscleExposure) as Array<[MuscleGroup, number]>) sum[m] = (sum[m] ?? 0) + v;
+    for (const [m, v] of Object.entries(s.muscleExposure) as Array<[MuscleGroup, number]>)
+      sum[m] = (sum[m] ?? 0) + v;
   }
-  return MUSCLE_GROUP_VALUES.map((m) => ({ key: m, value: round2(sum[m] ?? 0), bars: bars(sum[m] ?? 0, MUSCLE_REF[m]) }));
+  return MUSCLE_GROUP_VALUES.map((m) => ({
+    key: m,
+    value: round2(sum[m] ?? 0),
+    bars: bars(sum[m] ?? 0, MUSCLE_REF[m]),
+  }));
 }
 
 function round2(v: number): number {

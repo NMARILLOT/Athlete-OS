@@ -22,7 +22,14 @@ export const WOD_FORMAT_VALUES = [
 ] as const;
 export type WodFormat = (typeof WOD_FORMAT_VALUES)[number];
 
-export const WOD_PART_KIND_VALUES = ["warmup", "strength", "skill", "metcon", "accessory", "cooldown"] as const;
+export const WOD_PART_KIND_VALUES = [
+  "warmup",
+  "strength",
+  "skill",
+  "metcon",
+  "accessory",
+  "cooldown",
+] as const;
 export type WodPartKind = (typeof WOD_PART_KIND_VALUES)[number];
 
 export const WodLoadSchema = z

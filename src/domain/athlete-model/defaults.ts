@@ -34,16 +34,79 @@ export const DEFAULT_TOLERANCE: Record<LoadDimension, number> = {
 
 /** Reference load vectors for the candidate catalog and the unknown-WOD prior. */
 export const REFERENCE_LOAD: Record<string, LoadVector> = {
-  heavy_squat_5x5: { cardiovascular: 2, muscular_lower: 8, muscular_upper: 2, impact: 0, eccentric: 7, technical: 4 },
-  heavy_upper: { cardiovascular: 2, muscular_lower: 0.5, muscular_upper: 8, impact: 0, eccentric: 4, technical: 2 },
-  amrap_12_wb_burpee_row: { cardiovascular: 8, muscular_lower: 5, muscular_upper: 4, impact: 5, eccentric: 3, technical: 2 },
-  z2_run_60: { cardiovascular: 3, muscular_lower: 3, muscular_upper: 0, impact: 5, eccentric: 2, technical: 0 },
-  z2_bike_60: { cardiovascular: 3, muscular_lower: 3, muscular_upper: 0, impact: 0, eccentric: 0, technical: 0 },
-  vo2_run: { cardiovascular: 9, muscular_lower: 5, muscular_upper: 0, impact: 7, eccentric: 4, technical: 1 },
-  threshold_bike: { cardiovascular: 8, muscular_lower: 5, muscular_upper: 0, impact: 0, eccentric: 0, technical: 0 },
-  mobility: { cardiovascular: 0.5, muscular_lower: 0.5, muscular_upper: 0.5, impact: 0, eccentric: 0, technical: 0 },
+  heavy_squat_5x5: {
+    cardiovascular: 2,
+    muscular_lower: 8,
+    muscular_upper: 2,
+    impact: 0,
+    eccentric: 7,
+    technical: 4,
+  },
+  heavy_upper: {
+    cardiovascular: 2,
+    muscular_lower: 0.5,
+    muscular_upper: 8,
+    impact: 0,
+    eccentric: 4,
+    technical: 2,
+  },
+  amrap_12_wb_burpee_row: {
+    cardiovascular: 8,
+    muscular_lower: 5,
+    muscular_upper: 4,
+    impact: 5,
+    eccentric: 3,
+    technical: 2,
+  },
+  z2_run_60: {
+    cardiovascular: 3,
+    muscular_lower: 2.5,
+    muscular_upper: 0,
+    impact: 5,
+    eccentric: 2,
+    technical: 0,
+  },
+  z2_bike_60: {
+    cardiovascular: 3,
+    muscular_lower: 2,
+    muscular_upper: 0,
+    impact: 0,
+    eccentric: 0,
+    technical: 0,
+  },
+  vo2_run: {
+    cardiovascular: 9,
+    muscular_lower: 5,
+    muscular_upper: 0,
+    impact: 7,
+    eccentric: 4,
+    technical: 1,
+  },
+  threshold_bike: {
+    cardiovascular: 8,
+    muscular_lower: 5,
+    muscular_upper: 0,
+    impact: 0,
+    eccentric: 0,
+    technical: 0,
+  },
+  mobility: {
+    cardiovascular: 0.5,
+    muscular_lower: 0.5,
+    muscular_upper: 0.5,
+    impact: 0,
+    eccentric: 0,
+    technical: 0,
+  },
   /** Prior for a fixed CrossFit class whose WOD is unknown. */
-  crossfit_class_prior: { cardiovascular: 7, muscular_lower: 5, muscular_upper: 4, impact: 4, eccentric: 4, technical: 4 },
+  crossfit_class_prior: {
+    cardiovascular: 7,
+    muscular_lower: 5,
+    muscular_upper: 4,
+    impact: 4,
+    eccentric: 4,
+    technical: 4,
+  },
 };
 
 /** Credits prior for an unknown box class (confidence 0.4). */
@@ -109,7 +172,12 @@ export const WEEKLY_STRUCTURE = {
 } as const;
 
 /** Box prior learning (per weekday WOD pattern): EWMA α over the last 8 same-weekday analyses. */
-export const BOX_PRIOR = { alpha: 0.3, maxSamples: 8, minConfidenceToUse: 0.5, samplesForFullConfidence: 6 } as const;
+export const BOX_PRIOR = {
+  alpha: 0.3,
+  maxSamples: 8,
+  minConfidenceToUse: 0.5,
+  samplesForFullConfidence: 6,
+} as const;
 
 /** Deload (spec §42) — signals counted by evaluateDeload, multipliers applied while active. */
 export const DELOAD = {

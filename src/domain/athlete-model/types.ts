@@ -11,7 +11,9 @@ export interface AthleteModelParams {
   /** Mean daily session-RPE load over 28 days (AU), for the daily cap. */
   meanDailyLoadAU: number;
   /** Learned per-weekday box priors (0 = Monday). Absent when not learned. */
-  boxPriorByWeekday?: Partial<Record<number, { credits: Record<string, number>; confidence: number }>>;
+  boxPriorByWeekday?: Partial<
+    Record<number, { credits: Record<string, number>; confidence: number }>
+  >;
 }
 
 export interface Baseline {

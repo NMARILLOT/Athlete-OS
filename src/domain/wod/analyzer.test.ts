@@ -3,7 +3,12 @@ import { analyzeWod } from "./analyzer";
 import { parseWodText } from "./heuristic-parser";
 import { NormalizedWodSchema } from "./schema";
 
-const mv = (raw: string, exerciseId: string | null, extra: Record<string, unknown> = {}) => ({ raw, exerciseId, name: raw, ...extra });
+const mv = (raw: string, exerciseId: string | null, extra: Record<string, unknown> = {}) => ({
+  raw,
+  exerciseId,
+  name: raw,
+  ...extra,
+});
 const base = { sourceText: "x", parseConfidence: 1, parser: "USER" as const, parserVersion: "t" };
 
 describe("WOD analyzer", () => {
@@ -11,8 +16,25 @@ describe("WOD analyzer", () => {
     const wod = NormalizedWodSchema.parse({
       ...base,
       parts: [
-        { kind: "strength", format: "sets_reps", sets: 5, reps: 5, movements: [mv("Back squat", "back_squat", { load: { value: 0, unit: "kg", qualifier: "heavy" } })] },
-        { kind: "metcon", format: "amrap", durationMin: 12, movements: [mv("12 wall balls", "wall_ball", { reps: 12 }), mv("10 burpees", "burpee", { reps: 10 }), mv("250 m row", "row", { distanceM: 250 })] },
+        {
+          kind: "strength",
+          format: "sets_reps",
+          sets: 5,
+          reps: 5,
+          movements: [
+            mv("Back squat", "back_squat", { load: { value: 0, unit: "kg", qualifier: "heavy" } }),
+          ],
+        },
+        {
+          kind: "metcon",
+          format: "amrap",
+          durationMin: 12,
+          movements: [
+            mv("12 wall balls", "wall_ball", { reps: 12 }),
+            mv("10 burpees", "burpee", { reps: 10 }),
+            mv("250 m row", "row", { distanceM: 250 }),
+          ],
+        },
       ],
     });
     const a = analyzeWod(wod, { e1rms: { back_squat: 140 } });
@@ -34,7 +56,10 @@ describe("WOD analyzer", () => {
   });
 
   it("spec §7: deadlift 5×3 + 21-15-9 → hinge dominant, posterior chain, hard", () => {
-    const a = analyzeWod(parseWodText("Deadlift 5x3 heavy\n\nFor time\n21-15-9\ncal bike\ndeadlift 100/70 kg"), { e1rms: { deadlift: 180 } });
+    const a = analyzeWod(
+      parseWodText("Deadlift 5x3 heavy\n\nFor time\n21-15-9\ncal bike\ndeadlift 100/70 kg"),
+      { e1rms: { deadlift: 180 } },
+    );
     expect(a.tags).toContain("hinge_dominant");
     expect(a.stimulusCredits.strength_lower).toBeGreaterThanOrEqual(0.8);
     expect(a.stimulusCredits.hi_conditioning).toBeGreaterThanOrEqual(0.7);
@@ -44,7 +69,9 @@ describe("WOD analyzer", () => {
   });
 
   it("Fran is short, hard, glycolytic with gymnastics skill credit", () => {
-    const a = analyzeWod(parseWodText("Fran\nFor time\n21-15-9\nThrusters 43/30\nPull-ups"), { e1rms: { thruster: 80 } });
+    const a = analyzeWod(parseWodText("Fran\nFor time\n21-15-9\nThrusters 43/30\nPull-ups"), {
+      e1rms: { thruster: 80 },
+    });
     expect(a.timeDomain).toBe("short");
     expect(a.intensity).toBe("hard");
     expect(a.energySystems).toContain("glycolytic");
@@ -64,14 +91,18 @@ describe("WOD analyzer", () => {
   });
 
   it("tracks impact from double-unders and box jumps (spec §47)", () => {
-    const a = analyzeWod(parseWodText("3 rounds for time\n50 double unders\n20 box jumps\n400 m run"));
+    const a = analyzeWod(
+      parseWodText("3 rounds for time\n50 double unders\n20 box jumps\n400 m run"),
+    );
     expect(a.impactUnits).toBeGreaterThan(2);
     expect(a.loadVector.impact).toBeGreaterThan(2.5);
     expect(a.movements.find((m) => m.exerciseId === "double_under")?.totalReps).toBe(150);
   });
 
   it("credits olympic technique and power for a snatch day", () => {
-    const a = analyzeWod(parseWodText("Snatch 6x2 @ 75%\n\nAMRAP 10\n50 DU\n10 box jumps\n5 power snatch 40 kg"));
+    const a = analyzeWod(
+      parseWodText("Snatch 6x2 @ 75%\n\nAMRAP 10\n50 DU\n10 box jumps\n5 power snatch 40 kg"),
+    );
     expect(a.stimulusCredits.olympic_technique).toBeGreaterThan(0.5);
     expect(a.stimulusCredits.power).toBeGreaterThan(0.5);
     expect(a.modalities).toContain("weightlifting");
@@ -85,7 +116,24 @@ describe("WOD analyzer", () => {
   });
 
   it("unknown movements lower confidence and cap it at 0.6", () => {
-    const wod = NormalizedWodSchema.parse({ ...base, parts: [{ kind: "metcon", format: "amrap", durationMin: 10, movements: [mv("10 frobnicates", null, { reps: 10, hintedPattern: "squat", resolutionConfidence: 0 }), mv("10 burpees", "burpee", { reps: 10 })] }] });
+    const wod = NormalizedWodSchema.parse({
+      ...base,
+      parts: [
+        {
+          kind: "metcon",
+          format: "amrap",
+          durationMin: 10,
+          movements: [
+            mv("10 frobnicates", null, {
+              reps: 10,
+              hintedPattern: "squat",
+              resolutionConfidence: 0,
+            }),
+            mv("10 burpees", "burpee", { reps: 10 }),
+          ],
+        },
+      ],
+    });
     const a = analyzeWod(wod);
     expect(a.unknownMovements).toEqual(["10 frobnicates"]);
     expect(a.confidence).toBeLessThanOrEqual(0.6);

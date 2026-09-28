@@ -200,7 +200,11 @@ export type StimulusKey = (typeof STIMULUS_KEY_VALUES)[number];
 export type StimulusCredits = Partial<Record<StimulusKey, number>>;
 
 /** Stimulus keys whose exposure counts as a "hard" session for the weekly hard-session budget. */
-export const HARD_STIMULUS_KEYS: readonly StimulusKey[] = ["hi_conditioning", "threshold", "vo2max"];
+export const HARD_STIMULUS_KEYS: readonly StimulusKey[] = [
+  "hi_conditioning",
+  "threshold",
+  "vo2max",
+];
 
 /**
  * Window over which each stimulus target is counted (days). Low-frequency stimuli are counted over
@@ -412,6 +416,7 @@ export const INTENT_KIND_VALUES = [
   "want_row",
   "want_crossfit",
   "want_strength",
+  "want_hyrox",
   "want_big_session",
   "no_strength",
   "no_legs",

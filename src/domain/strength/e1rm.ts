@@ -41,14 +41,24 @@ export function e1rmConfidence(reps: number, rpe?: number | null): "HIGH" | "MED
 /** Best e1RM across a list of sets, ignoring warm-ups and sets outside the formula's range. */
 export function bestE1rm(
   sets: ReadonlyArray<{ weightKg: number; reps: number; isWarmup?: boolean; rpe?: number | null }>,
-): { e1rmKg: number; reps: number; weightKg: number; confidence: "HIGH" | "MEDIUM" | "LOW" } | null {
+): {
+  e1rmKg: number;
+  reps: number;
+  weightKg: number;
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+} | null {
   let best: ReturnType<typeof bestE1rm> = null;
   for (const s of sets) {
     if (s.isWarmup) continue;
     const e = estimateOneRepMax(s.weightKg, s.reps);
     if (e == null) continue;
     if (!best || e > best.e1rmKg) {
-      best = { e1rmKg: e, reps: s.reps, weightKg: s.weightKg, confidence: e1rmConfidence(s.reps, s.rpe) };
+      best = {
+        e1rmKg: e,
+        reps: s.reps,
+        weightKg: s.weightKg,
+        confidence: e1rmConfidence(s.reps, s.rpe),
+      };
     }
   }
   return best;

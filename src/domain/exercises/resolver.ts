@@ -27,7 +27,32 @@ export function normalizeMovementName(input: string): string {
   return tokens.join(" ").replace(/\s+/g, " ").trim();
 }
 
-const UNIT_TOKENS = new Set(["kg", "kgs", "lb", "lbs", "m", "km", "cal", "cals", "calorie", "calories", "rep", "reps", "sec", "secs", "min", "mins", "meter", "meters", "metre", "metres", "in", "inch", "inches", "pood"]);
+const UNIT_TOKENS = new Set([
+  "kg",
+  "kgs",
+  "lb",
+  "lbs",
+  "m",
+  "km",
+  "cal",
+  "cals",
+  "calorie",
+  "calories",
+  "rep",
+  "reps",
+  "sec",
+  "secs",
+  "min",
+  "mins",
+  "meter",
+  "meters",
+  "metre",
+  "metres",
+  "in",
+  "inch",
+  "inches",
+  "pood",
+]);
 
 /** Equipment qualifiers: when the input names one and a candidate alias names a different one, penalise. */
 const EQUIPMENT_QUALIFIERS: Record<string, string> = {
@@ -157,13 +182,19 @@ export function resolveExercise(
     if (!best || score > best.score) best = { exercise: entry.exercise, score };
   }
   if (best && best.score >= minConfidence) {
-    return { exercise: best.exercise, confidence: Math.round(best.score * 100) / 100, method: "fuzzy" };
+    return {
+      exercise: best.exercise,
+      confidence: Math.round(best.score * 100) / 100,
+      method: "fuzzy",
+    };
   }
   return null;
 }
 
 /** Convenience for tests and seeds: all aliases flattened as `[alias, exerciseId]`. */
-export function listAliasPairs(catalog: readonly ExerciseDef[] = EXERCISE_CATALOG): Array<[string, string]> {
+export function listAliasPairs(
+  catalog: readonly ExerciseDef[] = EXERCISE_CATALOG,
+): Array<[string, string]> {
   const out: Array<[string, string]> = [];
   for (const ex of catalog) {
     for (const a of new Set([ex.name.toLowerCase(), ...ex.aliases])) out.push([a, ex.id]);

@@ -1,5 +1,10 @@
 import { bestE1rm, roundToIncrement, weightForRepsAtRpe } from "./e1rm";
-import { QUALITY_TO_RPE, type ExposureRecord, type SetRecord, type StrengthPrescription } from "./types";
+import {
+  QUALITY_TO_RPE,
+  type ExposureRecord,
+  type SetRecord,
+  type StrengthPrescription,
+} from "./types";
 
 export const PROGRESSION_ALGORITHM_VERSION = "autoload_v1" as const;
 
@@ -23,7 +28,10 @@ export interface ProgressionDecision {
 }
 
 export interface ProgressionInput {
-  prescription: Pick<StrengthPrescription, "sets" | "repMin" | "repMax" | "targetRpeMin" | "targetRpeMax">;
+  prescription: Pick<
+    StrengthPrescription,
+    "sets" | "repMin" | "repMax" | "targetRpeMin" | "targetRpeMax"
+  >;
   /** Most recent exposure first. Only the latest is used for the decision; older ones feed e1RM. */
   history: ExposureRecord[];
   /** Plate increment available for this exercise (kg). */
@@ -72,7 +80,8 @@ export function decideProgression(input: ProgressionInput): ProgressionDecision 
       nextWeightKg: null,
       deltaKg: 0,
       ruleId: "FIRST_EXPOSURE_NO_DATA",
-      reason: "Pas d'historique : choisis une charge confortable, l'app apprend à partir de cette séance.",
+      reason:
+        "Pas d'historique : choisis une charge confortable, l'app apprend à partir de cette séance.",
       algorithmVersion: PROGRESSION_ALGORITHM_VERSION,
     };
   }

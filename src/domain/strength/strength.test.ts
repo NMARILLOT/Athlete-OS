@@ -66,11 +66,16 @@ describe("progression (autoload v1)", () => {
     const d = decideProgression({
       prescription,
       incrementKg: 2.5,
-      history: [{ date: "2026-09-25", sets: [
-        { reps: 5, weightKg: 90, rpe: 7 },
-        { reps: 5, weightKg: 90, rpe: 7.5 },
-        { reps: 5, weightKg: 90, rpe: 8 },
-      ] }],
+      history: [
+        {
+          date: "2026-09-25",
+          sets: [
+            { reps: 5, weightKg: 90, rpe: 7 },
+            { reps: 5, weightKg: 90, rpe: 7.5 },
+            { reps: 5, weightKg: 90, rpe: 8 },
+          ],
+        },
+      ],
     });
     expect(d.action).toBe("increase");
     expect(d.nextWeightKg).toBe(92.5);
@@ -82,11 +87,16 @@ describe("progression (autoload v1)", () => {
     const d = decideProgression({
       prescription,
       incrementKg: 2.5,
-      history: [{ date: "2026-09-25", sets: [
-        { reps: 5, weightKg: 90, quality: "easy" },
-        { reps: 5, weightKg: 90, quality: "easy" },
-        { reps: 5, weightKg: 90, rpe: 6 },
-      ] }],
+      history: [
+        {
+          date: "2026-09-25",
+          sets: [
+            { reps: 5, weightKg: 90, quality: "easy" },
+            { reps: 5, weightKg: 90, quality: "easy" },
+            { reps: 5, weightKg: 90, rpe: 6 },
+          ],
+        },
+      ],
     });
     expect(d.action).toBe("increase");
     expect(d.nextWeightKg).toBe(95);
@@ -96,11 +106,16 @@ describe("progression (autoload v1)", () => {
     const d = decideProgression({
       prescription,
       incrementKg: 2.5,
-      history: [{ date: "2026-09-25", sets: [
-        { reps: 5, weightKg: 90, rpe: 8.5 },
-        { reps: 5, weightKg: 90, rpe: 9 },
-        { reps: 5, weightKg: 90, quality: "hard" },
-      ] }],
+      history: [
+        {
+          date: "2026-09-25",
+          sets: [
+            { reps: 5, weightKg: 90, rpe: 8.5 },
+            { reps: 5, weightKg: 90, rpe: 9 },
+            { reps: 5, weightKg: 90, quality: "hard" },
+          ],
+        },
+      ],
     });
     expect(d.action).toBe("hold");
     expect(d.nextWeightKg).toBe(90);
@@ -111,11 +126,16 @@ describe("progression (autoload v1)", () => {
     const d = decideProgression({
       prescription,
       incrementKg: 2.5,
-      history: [{ date: "2026-09-25", sets: [
-        { reps: 5, weightKg: 100, rpe: 9 },
-        { reps: 4, weightKg: 100, rpe: 10 },
-        { reps: 3, weightKg: 100, quality: "failed" },
-      ] }],
+      history: [
+        {
+          date: "2026-09-25",
+          sets: [
+            { reps: 5, weightKg: 100, rpe: 9 },
+            { reps: 4, weightKg: 100, rpe: 10 },
+            { reps: 3, weightKg: 100, quality: "failed" },
+          ],
+        },
+      ],
     });
     expect(d.action).toBe("decrease");
     expect(d.nextWeightKg).toBe(95);
@@ -135,7 +155,20 @@ describe("progression (autoload v1)", () => {
   });
 
   it("is deterministic (same input → same output)", () => {
-    const input = { prescription, incrementKg: 2.5, history: [{ date: "2026-09-25", sets: [{ reps: 5, weightKg: 90, rpe: 7 }, { reps: 5, weightKg: 90, rpe: 7 }, { reps: 5, weightKg: 90, rpe: 7 }] }] };
+    const input = {
+      prescription,
+      incrementKg: 2.5,
+      history: [
+        {
+          date: "2026-09-25",
+          sets: [
+            { reps: 5, weightKg: 90, rpe: 7 },
+            { reps: 5, weightKg: 90, rpe: 7 },
+            { reps: 5, weightKg: 90, rpe: 7 },
+          ],
+        },
+      ],
+    };
     expect(decideProgression(input)).toEqual(decideProgression(input));
   });
 });

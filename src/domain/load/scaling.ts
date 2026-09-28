@@ -11,17 +11,34 @@ export const ACTUAL_SCALING_VERSION = "actual_scaling_v1" as const;
  */
 export function scaleTemplateLoadToActual(
   template: LoadVector,
-  actual: { rpe?: number | null; expectedRpe?: number | null; actualMin?: number | null; plannedMin?: number | null },
+  actual: {
+    rpe?: number | null;
+    expectedRpe?: number | null;
+    actualMin?: number | null;
+    plannedMin?: number | null;
+  },
 ): { loadVector: LoadVector; factor: number; estimated: boolean } {
   const c = ACTUAL_SCALING;
   let rpeFactor = 1;
   let estimated = false;
-  if (typeof actual.rpe === "number" && typeof actual.expectedRpe === "number" && actual.expectedRpe > 0) {
+  if (
+    typeof actual.rpe === "number" &&
+    typeof actual.expectedRpe === "number" &&
+    actual.expectedRpe > 0
+  ) {
     rpeFactor = Math.min(c.rpeRatioMax, Math.max(c.rpeRatioMin, actual.rpe / actual.expectedRpe));
   } else estimated = true;
   let durFactor = 1;
-  if (typeof actual.actualMin === "number" && typeof actual.plannedMin === "number" && actual.plannedMin > 0 && actual.actualMin > 0) {
-    durFactor = Math.min(c.durationRatioMax, Math.max(c.durationRatioMin, Math.sqrt(actual.actualMin / actual.plannedMin)));
+  if (
+    typeof actual.actualMin === "number" &&
+    typeof actual.plannedMin === "number" &&
+    actual.plannedMin > 0 &&
+    actual.actualMin > 0
+  ) {
+    durFactor = Math.min(
+      c.durationRatioMax,
+      Math.max(c.durationRatioMin, Math.sqrt(actual.actualMin / actual.plannedMin)),
+    );
   }
   const factor = Math.round(rpeFactor * durFactor * 100) / 100;
   return { loadVector: scaleLoadVector(template, factor), factor, estimated };

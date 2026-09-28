@@ -130,7 +130,9 @@ Score scale is fixed: safety −4, balance ±3, preference ±2, intent +6 (parti
 | `WEEKLY_GAP_PRIORITY`                | balance    | expressed by the coverage term (documented here for explanations: top gaps are named)                                                    |
 | `PROTECT_EASY_VOLUME`                | balance    | 14-day window, ≥ 90 cardio minutes: −3 on hard if hard share > 25 %; −2 on moderate if moderate share > 15 %; skipped when budget vetoed |
 | `WEEKLY_RECOVERY_DAY`                | safety     | `consecutiveTrainingDays ≥ 6` → veto hard, +6 recovery; balance: no rest day yet and `remainingDays ≤ 2` → +4 recovery                  |
-| `LONG_SESSION_PLACEMENT`             | balance    | long aerobic only with ≥ 90 min window and no hard yesterday (else −3)                                                                  |
+| `LONG_SESSION_PLACEMENT`             | balance    | long aerobic only with ≥ 90 min window and no hard yesterday (else −3); on a weekday with no known ≥ 90 min window and no intent asking, −6 (long sessions default to the weekend) |
+| `STALENESS`                          | balance    | candidate's primary stimulus not credited within its window: +2 (never in 42 d also +2), +3 when last credit > 1.5 × window ago       |
+| `HEAVY_STRENGTH_BUDGET`              | safety     | `heavyStrength7d ≥ 3` → veto heavy strength candidates                                                                                  |
 | `DELOAD_ACTIVE`                      | safety     | veto VO2/benchmarks/tests; strength allowed at RPE ≤ 7 with sets × 0.6 (prescription note); impact tolerance × 0.5                        |
 | `BASELINE_PHASE_CONSERVATIVE`        | safety     | engine-proposed hard ≤ `max(0, 2 − fixedClassesThisWeek)`; no doubles; confidence ≤ MEDIUM                                              |
 | `INTENT_RESPECT`                     | preference | +6 exact family match, +3 partial (same modality, other intensity)                                                                       |

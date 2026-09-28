@@ -21,7 +21,11 @@ export function restSecondsFor(intent: SetIntent, overrideSec?: number | null): 
 }
 
 /** Longer rest after a hard/failed set, never above the policy max. */
-export function adjustRestForQuality(baseSec: number, intent: SetIntent, quality?: "easy" | "perfect" | "hard" | "failed" | null): number {
+export function adjustRestForQuality(
+  baseSec: number,
+  intent: SetIntent,
+  quality?: "easy" | "perfect" | "hard" | "failed" | null,
+): number {
   const p = REST_POLICY[intent];
   if (quality === "hard") return Math.min(p.maxSec, Math.round(baseSec * 1.2));
   if (quality === "failed") return Math.min(p.maxSec, Math.round(baseSec * 1.4));
