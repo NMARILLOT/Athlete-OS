@@ -457,11 +457,12 @@ export const RULES: Rule[] = [
         ["want_run", "want_bike", "have_time", "surprise", "want_big_session"].includes(
           ctx.intent.kind,
         );
+      // Strong by design: without a known ≥ 90 min window, a weekday long session loses to a quality session.
       if (!weekend && ctx.largestWindowMin < 90 && !asked)
         return score(
           "LONG_SESSION_PLACEMENT",
           "balance",
-          -3,
+          -6,
           "Sortie longue plutôt le week-end (ou dis-moi que tu as le temps)",
         );
       return null;
