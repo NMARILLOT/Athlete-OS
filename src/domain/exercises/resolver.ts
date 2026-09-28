@@ -62,7 +62,6 @@ const NOISE_TOKENS = new Set([
   "an",
   "de",
   "des",
-  "du",
   "le",
   "la",
   "les",

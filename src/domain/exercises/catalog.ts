@@ -724,7 +724,7 @@ export const EXERCISE_CATALOG: readonly ExerciseDef[] = [
     technicalDifficulty: 1,
     impactLevel: 2,
     eccentricLoad: 1,
-    cost: c(1.5, 1.5, 3),
+    cost: c(1, 1, 3),
   },
   {
     id: "bar_facing_burpee",
@@ -740,7 +740,7 @@ export const EXERCISE_CATALOG: readonly ExerciseDef[] = [
     technicalDifficulty: 1,
     impactLevel: 3,
     eccentricLoad: 1,
-    cost: c(1.5, 1.5, 3),
+    cost: c(1, 1, 3),
   },
   {
     id: "burpee_box_jump_over",
@@ -756,7 +756,7 @@ export const EXERCISE_CATALOG: readonly ExerciseDef[] = [
     technicalDifficulty: 2,
     impactLevel: 3,
     eccentricLoad: 2,
-    cost: c(2.5, 1.5, 3),
+    cost: c(2, 1, 3),
   },
 
   // ---------------------------------------------------------------------------
