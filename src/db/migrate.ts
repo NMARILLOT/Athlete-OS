@@ -24,7 +24,12 @@ export async function runMigrations(
   if (!directUrl) {
     throw new Error("Missing DIRECT_DATABASE_URL: migrations need the direct Postgres connection.");
   }
-  const client = postgres(directUrl, { max: 1, prepare: false });
+  const client = postgres(directUrl, {
+    max: 1,
+    prepare: false,
+    connect_timeout: 15,
+    onnotice: () => {},
+  });
   try {
     await migrate(drizzle(client), { migrationsFolder: migrationsFolder() });
   } finally {

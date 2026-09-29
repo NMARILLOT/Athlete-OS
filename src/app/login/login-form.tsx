@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { authErrorFr } from "@/lib/auth-error-fr";
 import { safeNextPath } from "@/lib/safe-next-path";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 
@@ -63,7 +64,7 @@ export function LoginForm() {
         router.refresh();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Connexion impossible");
+      setError(authErrorFr(err));
     } finally {
       setBusy(false);
     }

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { safeNextPath } from "@/lib/safe-next-path";
-import { parseEmailList } from "@/server/env";
+import { parseEmailList } from "@/server/env-schema";
 
 /**
  * Next 16 proxy (formerly middleware): refreshes the Supabase session cookie and redirects

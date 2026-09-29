@@ -13,7 +13,7 @@ import { seedCatalog, type SeedReport } from "../src/db/seed";
  *    `./.pglite`), migrated first. Stop the dev server before seeding: PGlite is single-process.
  */
 async function seedPostgres(url: string): Promise<SeedReport> {
-  const client = postgres(url, { max: 1, prepare: false });
+  const client = postgres(url, { max: 1, prepare: false, onnotice: () => {} });
   try {
     return await seedCatalog(drizzle(client, { schema }));
   } finally {

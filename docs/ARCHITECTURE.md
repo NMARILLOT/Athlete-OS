@@ -27,7 +27,7 @@ Three consequences drive the architecture:
 | Framework        | Next.js 16 (App Router, React 19, Server Components + Server Actions + Route Handlers), TypeScript strict                |
 | Styling          | Tailwind CSS 4, design tokens in `globals.css`, dark-first, 56 px tap targets                                            |
 | Database         | PostgreSQL. Production: Supabase Postgres (**`DATABASE_URL` mandatory**). Dev & tests: embedded PGlite (never in prod)   |
-| ORM / migrations | Drizzle ORM + drizzle-kit; SQL migrations committed in `drizzle/`, applied against `DIRECT_DATABASE_URL` before deploys  |
+| ORM / migrations | Drizzle ORM + drizzle-kit; SQL migrations committed in `drizzle/`, applied by the Vercel build hook (ADR-024)  |
 | Auth             | Supabase Auth, **email + password / email OTP only** (no magic link, no OAuth in MVP 1); `AUTH_MODE=local` for localhost |
 | Validation       | Zod 4 (AI outputs `.strict()`, server action inputs, JSONB columns, env)                                                 |
 | AI               | Anthropic SDK (Layer B) with `maxRetries: 1`, `timeout: 30 s`, per-kind budgets; `AI_PROVIDER=mock` → heuristic parser   |

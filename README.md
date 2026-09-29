@@ -46,9 +46,14 @@ src/components/ UI primitives and feature components · src/stores/ offline-firs
 
 ## Production
 
-Set `DATABASE_URL` (Supabase pooler, port 6543), `DIRECT_DATABASE_URL` (5432, migrations only), `AUTH_MODE=supabase`,
-Supabase URL/anon key, `ALLOWED_EMAILS` (mandatory: with `AUTH_MODE=supabase` the app refuses to boot in production / on
-Vercel when the allow-list is empty), `CRON_SECRET`. Disable sign-ups in the Supabase project. Run `npm run db:migrate`
-against `DIRECT_DATABASE_URL` before promoting a deploy. One Vercel Cron: `/api/cron/daily`.
+Step-by-step guide (French): [`docs/DEPLOY.md`](docs/DEPLOY.md) — Supabase, Vercel, iPhone install, Garmin, Anthropic.
+
+Set `DATABASE_URL` (Supabase transaction pooler, port 6543), `DIRECT_DATABASE_URL` (Supabase session pooler, port 5432),
+`AUTH_MODE=supabase`, Supabase URL/public key, `ALLOWED_EMAILS` (mandatory: with `AUTH_MODE=supabase` the app refuses to
+boot in production / on Vercel when the allow-list is empty), `CRON_SECRET`. Disable sign-ups in the Supabase project.
+Production deploys run `npm run vercel-build`: `scripts/predeploy.ts` validates the environment with the app's own rules,
+applies the migrations and upserts the reference data, then `next build` (preview deployments skip the database steps).
+Functions are pinned to Paris (`cdg1`, `vercel.json`) next to a Supabase project in West EU (Paris). One Vercel Cron:
+`/api/cron/daily`.
 
 Garmin's official APIs require Developer Program approval; until then `GARMIN_PROVIDER=mock` and manual FIT import.

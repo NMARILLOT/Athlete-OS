@@ -123,3 +123,14 @@ linked (source `CALCULATED`) and is otherwise upgraded from the RPE via the vers
 declared PRs are `MEDIUM` confidence; mock Garmin data is `provider = garmin_mock` / source `MOCK` and refused in production unless
 `FLAG_GARMIN_MOCK_IN_PROD` is set. `finished_at` for late feedback is the planned end of the session, not the feedback time.
 
+## ADR-024 — Production deploys migrate and seed in the Vercel build
+**Decision.** `package.json` defines `vercel-build` (run by Vercel instead of `build`): `scripts/predeploy.ts` then `next build`.
+On `VERCEL_ENV=production` the hook validates the runtime environment with the app's own rules (`parseServerEnv`, shared with
+`env()` through `src/server/env-schema.ts`), applies the committed migrations on `DIRECT_DATABASE_URL` (Supabase session
+pooler, IPv4) and upserts the reference data; preview deployments and local builds skip the database steps so an unmerged
+migration never reaches production. Functions are pinned to `cdg1` next to a Supabase project in `eu-west-3`.
+**Why.** The owner never needs a local toolchain to deploy; a misconfigured variable or an unreachable database fails the
+build with a readable French message instead of a 500 after deploy. **Consequences.** Migrations run while the previous
+version still serves, so they must stay additive / backward compatible; a failed migration blocks the deploy and the
+previous version keeps serving. Verified against PostgreSQL 16 through postgres.js (migrate, seed, full app, cron, jobs).
+
