@@ -13,9 +13,8 @@ import { logRestDay } from "@/server/services/log.service";
 import {
   acceptOption,
   applyReschedules,
-  getCurrentRecommendation,
-  getRecommendation,
   recompute,
+  resolveRecommendation,
 } from "@/server/services/recommendation.service";
 import {
   declareIntent,
@@ -183,9 +182,9 @@ export async function startOptionAction(
   if (sel.plannedId || sel.fixed)
     throw new ValidationError("Cette séance n'est plus prévue aujourd'hui : recharge la page.");
 
-  const rec =
-    (recId ? await getRecommendation(db, user.id, recId) : null) ??
-    (await getCurrentRecommendation(db, user.id, today));
+  // The client's id is honoured only when its row is today's (a tab left open overnight sends
+  // yesterday's); otherwise today's current recommendation resolves the option.
+  const rec = await resolveRecommendation(db, user.id, { recommendationId: recId, date: today });
   const fromRec = rec
     ? [
         rec.output.primary,

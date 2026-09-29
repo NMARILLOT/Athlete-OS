@@ -1,10 +1,19 @@
 import "server-only";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@/db/client";
-import { crossfitWorkouts, workoutAnalyses, workoutExercises, workouts } from "@/db/schema";
+import {
+  activities,
+  cardioWorkouts,
+  crossfitWorkouts,
+  workoutAnalyses,
+  workoutExercises,
+  workouts,
+} from "@/db/schema";
+import type { TimeInZones } from "@/domain/cardio";
 import {
   FEELING_TO_FUN,
   toConfidence,
+  type CardioKind,
   type Feeling,
   type IntensityBand,
   type WorkoutType,
@@ -27,7 +36,7 @@ import {
 } from "@/domain/wod";
 import { getExercise } from "@/domain/exercises";
 import { STRENGTH_TEMPLATES } from "@/domain/strength";
-import { NotFoundError } from "@/server/errors";
+import { NotFoundError, ValidationError } from "@/server/errors";
 import { instantFor, localDate, localMinute } from "@/server/time";
 import { ENGINE_PLANNED_STATUSES, kindOf } from "./engine-input";
 
@@ -379,6 +388,35 @@ export function realisedBandFromFeedback(
   return BAND_RANK[band] > BAND_RANK[base] ? band : base;
 }
 
+/** Zone minutes must cover at least this share of the measured duration (`activity.service` rule). */
+const MEASURED_ZONE_COVERAGE = 0.5;
+
+/**
+ * Band *measured* by the activities realising a session (Garmin/FIT link): the HR-zone
+ * distribution through the deterministic classifier, exactly as the import stored it (zone set +
+ * zone minutes covering ≥ half the duration, else nothing was measured → null). Recomputed at
+ * feedback time from the stored zone minutes so an earlier RPE upgrade never poses as a measurement.
+ */
+export function measuredBandFromActivities(
+  rows: ReadonlyArray<{
+    zoneSetId: string | null;
+    timeInZones: TimeInZones | null;
+    durationSec: number;
+  }>,
+  cardioKind: CardioKind | null,
+): IntensityBand | null {
+  let best: IntensityBand | null = null;
+  for (const a of rows) {
+    const z = a.timeInZones;
+    if (!a.zoneSetId || !z || a.durationSec <= 0) continue;
+    const covered = z.z1 + z.z2 + z.z3 + z.z4 + z.z5;
+    if (covered < (a.durationSec / 60) * MEASURED_ZONE_COVERAGE) continue;
+    const band = classifyIntensity({ minutesInZones: z, cardioKind }).band;
+    if (!best || BAND_RANK[band] > BAND_RANK[best]) best = band;
+  }
+  return best;
+}
+
 /**
  * Post-session feedback (spec §22) → actual analysis (planned × RPE/duration scaling) + session-RPE
  * load. Rules:
@@ -386,10 +424,13 @@ export function realisedBandFromFeedback(
  *    duration serves the load computation but is never stored as "réelle");
  *  - `finished_at` is the feedback time on the day of the session; late feedback (a later local
  *    day) is stamped at the planned end (start + duration), never "now";
- *  - the realised intensity is upgraded from the RPE (`realisedBandFromFeedback`) unless given;
+ *  - the realised intensity is the planned band — or the band measured by a linked activity's HR
+ *    zones, the only floor — upgraded from the RPE (`realisedBandFromFeedback`) unless given; it is
+ *    re-derived on every feedback, so a corrected lower RPE brings it back down to the plan;
  *  - "Modifier le ressenti" on a workout finished by a specialised path (strength tracker,
  *    Garmin/FIT import, coaching) only touches rpe / feeling / pain / notes / session-RPE load:
- *    their measured duration, finish time, realised intensity and actual analysis are kept.
+ *    their measured duration, finish time, realised intensity and actual analysis are kept — except
+ *    a band nothing measured (null, or an import without HR data), which the RPE alone fills.
  */
 export async function completeWorkout(
   db: Db,
@@ -430,7 +471,7 @@ export async function completeWorkout(
     .where(and(eq(workoutAnalyses.workoutId, w.id), eq(workoutAnalyses.phase, "planned")))
     .limit(1);
   const [existingActual] = await db
-    .select({ algorithmVersion: workoutAnalyses.algorithmVersion })
+    .select()
     .from(workoutAnalyses)
     .where(and(eq(workoutAnalyses.workoutId, w.id), eq(workoutAnalyses.phase, "actual")))
     .limit(1);
@@ -439,6 +480,26 @@ export async function completeWorkout(
   const managedActual =
     !existingActual || existingActual.algorithmVersion.endsWith(`+${ACTUAL_SCALING_VERSION}`);
   const keepSpecialised = alreadyDone && !managedActual;
+  // Activities realising this session (Garmin/FIT link): the only source of a *measured* band.
+  const linked = await db
+    .select({
+      zoneSetId: activities.zoneSetId,
+      timeInZones: activities.timeInZones,
+      avgHr: activities.avgHr,
+      durationSec: activities.durationSec,
+    })
+    .from(activities)
+    .where(and(eq(activities.userId, userId), eq(activities.workoutId, w.id)));
+  const [cardio] = linked.length
+    ? await db
+        .select({ kind: cardioWorkouts.workoutKind })
+        .from(cardioWorkouts)
+        .where(and(eq(cardioWorkouts.workoutId, w.id), eq(cardioWorkouts.userId, userId)))
+        .limit(1)
+    : [];
+  const measured = measuredBandFromActivities(linked, cardio?.kind ?? null);
+  // An import whose HR resolved a zone (distribution or average HR) stored an HR-based band.
+  const hrBased = measured != null || linked.some((a) => a.zoneSetId != null && a.avgHr != null);
 
   const actualDurationMin = opts.actualDurationMin ?? w.actualDurationMin ?? null;
   const durationMin = actualDurationMin ?? w.plannedDurationMin ?? null;
@@ -451,23 +512,41 @@ export async function completeWorkout(
         plannedMin: w.plannedDurationMin,
       })
     : null;
-  // A measured band (activity import: HR zones) is the floor; otherwise start from the plan.
-  const baseBand =
-    w.intensitySource === "CALCULATED" && w.realisedIntensity
-      ? w.realisedIntensity
-      : (planned?.intensity ?? w.realisedIntensity ?? w.plannedIntensity ?? null);
+  const plannedBand = planned?.intensity ?? w.plannedIntensity ?? null;
+  // Floor: the band measured by a linked activity (HR zones), else the plan — never a previous
+  // RPE-derived band, so a corrected (lower) RPE brings the band back down to the plan.
+  const baseBand = measured ?? plannedBand;
+  // A specialised finisher's band is kept, unless nothing measured it: a null band, or an import
+  // without HR data (its band can only have come from an earlier RPE). Then the RPE alone decides
+  // (no measured load vector to weigh it against), re-derived on every feedback.
+  const rpeOnly =
+    keepSpecialised && (w.realisedIntensity == null || (linked.length > 0 && !hrBased));
   const realisedIntensity = keepSpecialised
-    ? w.realisedIntensity
+    ? rpeOnly
+      ? realisedBandFromFeedback(null, {
+          loadVector: null,
+          rpe: opts.rpe,
+          heavyStrength: existingActual?.heavyStrength ?? w.type === "strength",
+        })
+      : w.realisedIntensity
     : (opts.realisedIntensity ??
       realisedBandFromFeedback(baseBand, {
         loadVector: scaled?.loadVector ?? null,
         rpe: opts.rpe,
         heavyStrength: planned?.heavyStrength ?? w.type === "strength",
       }));
-  const intensitySource =
-    !keepSpecialised && !opts.realisedIntensity && realisedIntensity !== baseBand
+  const intensitySource = keepSpecialised
+    ? rpeOnly && realisedIntensity
       ? "CALCULATED"
-      : w.intensitySource;
+      : w.intensitySource
+    : opts.realisedIntensity
+      ? w.intensitySource
+      : measured != null || realisedIntensity !== plannedBand
+        ? "CALCULATED"
+        : // Back on the planned band: undo the stamp left by an earlier RPE upgrade.
+          w.intensitySource === "CALCULATED" && planned && planned.source !== "CALCULATED"
+          ? planned.source
+          : w.intensitySource;
   const lateFeedback = localDate(now, timezone) > w.date;
   const plannedEnd = new Date(
     (w.startAt ?? instantFor(w.date, 17 * 60, timezone)).getTime() + (durationMin ?? 0) * 60000,
@@ -488,10 +567,19 @@ export async function completeWorkout(
           : load
         : load,
       ...(keepSpecialised
-        ? {}
+        ? rpeOnly
+          ? { realisedIntensity, intensitySource }
+          : {}
         : { actualDurationMin, finishedAt, realisedIntensity, intensitySource }),
     })
     .where(eq(workouts.id, w.id));
+  // The finisher's actual row keeps its load vector and provenance; only the band it could not
+  // measure follows the RPE (the engine reads the band from the workouts row first anyway).
+  if (rpeOnly && realisedIntensity && existingActual)
+    await db
+      .update(workoutAnalyses)
+      .set({ intensity: realisedIntensity, computedAt: new Date() })
+      .where(eq(workoutAnalyses.id, existingActual.id));
   if (opts.score)
     await db
       .update(crossfitWorkouts)
@@ -537,6 +625,17 @@ export async function completeWorkout(
 }
 
 export async function skipWorkout(db: Db, userId: string, workoutId: string): Promise<void> {
+  const [w] = await db
+    .select({ status: workouts.status, type: workouts.type })
+    .from(workouts)
+    .where(and(eq(workouts.id, workoutId), eq(workouts.userId, userId)))
+    .limit(1);
+  if (!w) throw new NotFoundError("Séance");
+  // A live session is closed by a finish (or abandoned from the session), never skipped from outside.
+  if (w.status === "in_progress" && (w.type === "strength" || w.type === "cardio"))
+    throw new ValidationError(
+      "Cette séance est en cours : termine-la (ou abandonne-la depuis la séance) avant de la sauter.",
+    );
   await db
     .update(workouts)
     .set({ status: "skipped" })

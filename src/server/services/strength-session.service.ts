@@ -21,12 +21,19 @@ import {
 } from "@/domain/strength";
 import { getExercise } from "@/domain/exercises";
 import { isHeavyStrengthSession, sessionRpeLoad } from "@/domain/load";
-import { FEELING_VALUES, toConfidence, type Feeling, type WorkoutStatus } from "@/domain/core";
+import {
+  FEELING_VALUES,
+  INTENSITY_BAND_VALUES,
+  toConfidence,
+  type Feeling,
+  type IntensityBand,
+  type WorkoutStatus,
+} from "@/domain/core";
 import type { IsoDate as IsoDateT } from "@/domain/core/dates";
 import { NotFoundError, ValidationError } from "@/server/errors";
 import { log } from "@/server/logging";
 import { z } from "zod";
-import { analysisRowFromProfile } from "./workout.service";
+import { analysisRowFromProfile, realisedBandFromFeedback } from "./workout.service";
 import { profileOfKind } from "@/domain/engine/fixtures";
 
 export interface StrengthBundleExercise {
@@ -397,12 +404,12 @@ const SessionFinishedPayload = z.object({
   feeling: z.enum(FEELING_VALUES).nullable().optional(),
   painReported: z.boolean().optional(),
   notes: z.string().max(2000).optional(),
-  durationMin: z
-    .number()
-    .int()
-    .min(1)
-    .max(24 * 60)
-    .optional(),
+  /**
+   * Wall-clock minutes between the start and the "Terminer" tap. Never a reason to reject the
+   * finish: a session resumed days later sends thousands of minutes, and the declared RPE / pain
+   * report it carries must still land. `effectiveStrengthDurationMin` decides what is plausible.
+   */
+  durationMin: z.number().optional().catch(undefined),
 });
 
 const EventEnvelope = {
@@ -453,14 +460,51 @@ export type StrengthEvent = z.infer<typeof StrengthEventSchema>;
 
 const CLOSED_STATUSES: ReadonlySet<WorkoutStatus> = new Set(["done", "skipped"]);
 
+/** Longest plausible strength session: anything beyond is a finish tapped long after the last set. */
+const MAX_STRENGTH_SESSION_MIN = 240;
+
 /**
- * Apply a batch of client events in order, idempotently (client_events unique id), scoped to the
- * user's own workout. Returns acknowledged event ids (including already-applied, dropped-as-orphan
- * and dropped-as-invalid ones, so a poison event can never block the outbox).
+ * Effective duration of a strength session (1..240 min), shared by the outbox finish and the daily
+ * stale-session sweep so both closing paths agree:
+ *  1. the athlete's own start → "Terminer" wall-clock when plausible (declared, measured on the phone);
+ *  2. else start → last logged set (a finish tapped hours or days later, a resumed session);
+ *  3. else the planned duration (45 min default) — never a multi-day wall-clock fed to the load.
+ */
+export function effectiveStrengthDurationMin(input: {
+  declaredMin: number | null | undefined;
+  startAt: Date | null;
+  lastSetAt: Date | null;
+  plannedDurationMin: number | null;
+}): number {
+  const plausible = (n: number | null | undefined): n is number =>
+    typeof n === "number" && Number.isFinite(n) && n >= 1 && n <= MAX_STRENGTH_SESSION_MIN;
+  if (plausible(input.declaredMin)) return Math.round(input.declaredMin);
+  if (input.startAt && input.lastSetAt) {
+    const measured = Math.round((input.lastSetAt.getTime() - input.startAt.getTime()) / 60_000);
+    if (plausible(measured)) return measured;
+  }
+  return input.plannedDurationMin ?? 45;
+}
+
+/**
+ * A `done` row closed by the daily sweep carries no declared outcome (rpe and feeling null): the
+ * athlete's own late `session_finished` must still apply to it (analysis, load, PRs recomputed
+ * with every set now synced). A `skipped` row or a declared outcome is never overwritten.
+ */
+function acceptsLateFinish(w: typeof workouts.$inferSelect): boolean {
+  return w.status === "done" && w.rpe == null && w.feeling == null;
+}
+
+/**
+ * Apply a batch of client events in the order received (the client appends per workout in `seq`
+ * order; re-sorting the whole batch would interleave a re-seeded session with the original one),
+ * idempotently (client_events unique id), scoped to the user's own workout. Returns acknowledged
+ * event ids (including already-applied, dropped-as-orphan and dropped-as-invalid ones, so a poison
+ * event can never block the outbox).
  *
  * Invariants (ARCHITECTURE §4.2): the client is authoritative only while the workout is
  * `in_progress`; a `done`/`skipped` workout is never revived by `session_started` nor overwritten
- * by a stray second `session_finished`.
+ * by a stray second `session_finished` once it carries a declared outcome.
  */
 export async function applyStrengthEvents(
   db: Db,
@@ -469,8 +513,7 @@ export async function applyStrengthEvents(
 ): Promise<{ acknowledged: string[]; finishedWorkoutIds: string[] }> {
   const acknowledged: string[] = [];
   const finished: string[] = [];
-  const sorted = [...events].sort((a, b) => a.seq - b.seq);
-  for (const raw of sorted) {
+  for (const raw of events) {
     const [already] = await db
       .select({ id: clientEvents.id })
       .from(clientEvents)
@@ -502,7 +545,12 @@ export async function applyStrengthEvents(
       acknowledged.push(ev.id); // drop orphan events rather than blocking the outbox forever
       continue;
     }
-    if (w && CLOSED_STATUSES.has(w.status) && ev.type === "session_finished") {
+    if (
+      w &&
+      CLOSED_STATUSES.has(w.status) &&
+      ev.type === "session_finished" &&
+      !acceptsLateFinish(w)
+    ) {
       // A stray second finish (re-seeded shell, replayed batch) must never overwrite the declared outcome.
       log.warn("sync.strength.finish_on_closed_workout", {
         userId,
@@ -718,12 +766,21 @@ export async function applyStrengthEvents(
           if (!w) break;
           const p = ev.payload;
           const finishedAt = p.finishedAt ? new Date(p.finishedAt) : new Date(ev.at);
-          const durationMin =
+          const [lastSet] = await tx
+            .select({ completedAt: strengthSets.completedAt })
+            .from(strengthSets)
+            .where(and(eq(strengthSets.workoutId, w.id), eq(strengthSets.userId, userId)))
+            .orderBy(desc(strengthSets.completedAt))
+            .limit(1);
+          const declaredMin =
             p.durationMin ??
-            Math.max(
-              1,
-              Math.round((finishedAt.getTime() - (w.startAt ?? finishedAt).getTime()) / 60000),
-            );
+            (w.startAt ? Math.round((finishedAt.getTime() - w.startAt.getTime()) / 60_000) : null);
+          const durationMin = effectiveStrengthDurationMin({
+            declaredMin,
+            startAt: w.startAt,
+            lastSetAt: lastSet?.completedAt ?? null,
+            plannedDurationMin: w.plannedDurationMin,
+          });
           await finishStrengthWorkout(tx as unknown as Db, userId, {
             workout: w,
             finishedAt,
@@ -733,6 +790,7 @@ export async function applyStrengthEvents(
             painReported: p.painReported ?? false,
             notes: p.notes ?? "",
           });
+          // Done or reverted to planned: either way the engine's planned/history set changed.
           finished.push(w.id);
           break;
         }
@@ -747,8 +805,18 @@ export async function applyStrengthEvents(
   return { acknowledged, finishedWorkoutIds: [...new Set(finished)] };
 }
 
-/** Finish: session-RPE load, actual analysis from performed sets, e1RM PRs. */
-/** Finish a strength workout server-side (outbox `session_finished`, or the daily stale-session sweep). */
+function maxBand(a: IntensityBand, b: IntensityBand): IntensityBand {
+  return INTENSITY_BAND_VALUES.indexOf(a) >= INTENSITY_BAND_VALUES.indexOf(b) ? a : b;
+}
+
+/**
+ * Finish a strength workout server-side (outbox `session_finished`, or the daily stale-session
+ * sweep): session-RPE load, actual analysis from the performed sets, e1RM PRs.
+ *
+ * A session with no working set and no declared RPE was never performed (started by mistake,
+ * abandoned from the conflict chooser, swept by the daily job): the row goes back to `planned`
+ * instead of becoming a `done` workout with an invented 30 % load — and can be started again.
+ */
 export async function finishStrengthWorkout(
   db: Db,
   userId: string,
@@ -761,14 +829,64 @@ export async function finishStrengthWorkout(
     painReported: boolean;
     notes: string;
   },
-): Promise<void> {
+): Promise<{ outcome: "done" | "reverted" }> {
   const w = opts.workout;
   const sets = await db
     .select()
     .from(strengthSets)
     .where(and(eq(strengthSets.workoutId, w.id), eq(strengthSets.userId, userId)));
-  const heavy = isHeavyStrengthSession(
-    sets.map((s) => ({ rpe: s.rpe, quality: s.quality, isWarmup: s.isWarmup })),
+  const doneSets = sets.filter((s) => !s.isWarmup).length;
+  if (doneSets === 0 && opts.rpe == null) {
+    await db
+      .update(workouts)
+      .set({
+        status: "planned",
+        startAt: null,
+        finishedAt: null,
+        actualDurationMin: null,
+        rpe: null,
+        feeling: null,
+        painReported: false,
+        notes: opts.notes,
+        sessionRpeLoad: null,
+        realisedIntensity: null,
+      })
+      .where(and(eq(workouts.id, w.id), eq(workouts.userId, userId)));
+    await db
+      .delete(workoutAnalyses)
+      .where(
+        and(
+          eq(workoutAnalyses.workoutId, w.id),
+          eq(workoutAnalyses.userId, userId),
+          eq(workoutAnalyses.phase, "actual"),
+        ),
+      );
+    log.info("strength.finish_reverted_to_planned", { userId, workoutId: w.id });
+    return { outcome: "reverted" };
+  }
+
+  const [planned] = await db
+    .select()
+    .from(workoutAnalyses)
+    .where(and(eq(workoutAnalyses.workoutId, w.id), eq(workoutAnalyses.phase, "planned")))
+    .limit(1);
+  // Heavy: a working set at RPE ≥ 8 / hard / failed, or a declared session RPE ≥ 8 (unrated sets).
+  const heavy =
+    isHeavyStrengthSession(
+      sets.map((s) => ({ rpe: s.rpe, quality: s.quality, isWarmup: s.isWarmup })),
+    ) ||
+    (opts.rpe != null && opts.rpe >= 8);
+  // Realised band (ADR-023): upgraded from the declared RPE through the versioned classifier,
+  // never below the planned band; heavy sets are at least "moderate" on the metabolic axis.
+  const plannedBand = w.plannedIntensity ?? planned?.intensity ?? null;
+  const setBand: IntensityBand = heavy ? "moderate" : "easy";
+  const realisedIntensity = maxBand(
+    realisedBandFromFeedback(plannedBand, {
+      loadVector: planned?.loadVector ?? null,
+      rpe: opts.rpe,
+      heavyStrength: heavy,
+    }) ?? setBand,
+    setBand,
   );
   await db
     .update(workouts)
@@ -781,17 +899,12 @@ export async function finishStrengthWorkout(
       painReported: opts.painReported,
       notes: opts.notes,
       sessionRpeLoad: sessionRpeLoad(opts.durationMin, opts.rpe),
-      realisedIntensity: heavy ? "moderate" : "easy",
+      realisedIntensity,
       intensitySource: "CALCULATED",
     })
     .where(and(eq(workouts.id, w.id), eq(workouts.userId, userId)));
 
   // Actual analysis: planned profile scaled by performed volume (sets done / sets planned) and RPE.
-  const [planned] = await db
-    .select()
-    .from(workoutAnalyses)
-    .where(and(eq(workoutAnalyses.workoutId, w.id), eq(workoutAnalyses.phase, "planned")))
-    .limit(1);
   const exRows = await db
     .select()
     .from(workoutExercises)
@@ -801,7 +914,6 @@ export async function finishStrengthWorkout(
       (a, e) => a + (StrengthPrescriptionSchema.safeParse(e.prescription).data?.sets ?? 3),
       0,
     ) || 1;
-  const doneSets = sets.filter((s) => !s.isWarmup).length;
   const volumeFactor = Math.min(1.3, Math.max(0.3, doneSets / plannedSets));
   const rpeFactor =
     opts.rpe != null && w.expectedRpe ? Math.min(1.4, Math.max(0.6, opts.rpe / w.expectedRpe)) : 1;
@@ -842,7 +954,7 @@ export async function finishStrengthWorkout(
       muscleExposure: base?.muscleExposure ?? {},
       energySystems: ["phosphagen"],
       impactUnits: 0,
-      intensity: heavy ? "moderate" : "easy",
+      intensity: realisedIntensity,
       heavyStrength: heavy,
       source: "CALCULATED",
       inputRef: base?.inputRef ?? null,
@@ -851,10 +963,13 @@ export async function finishStrengthWorkout(
     })
     .onConflictDoUpdate({
       target: [workoutAnalyses.workoutId, workoutAnalyses.phase],
+      // A late finish on a system-closed row recomputes everything with the sets now present.
       set: {
         stimulusCredits: credits,
         loadVector: loadVector as (typeof workoutAnalyses.$inferInsert)["loadVector"],
+        intensity: realisedIntensity,
         heavyStrength: heavy,
+        confidence: toConfidence(opts.rpe != null ? 0.9 : 0.6),
         computedAt: new Date(),
       },
     });
@@ -903,8 +1018,28 @@ export async function finishStrengthWorkout(
           algorithmVersion: E1RM_ALGORITHM_VERSION,
           previousValue: previous,
         })
-        .onConflictDoNothing();
+        .onConflictDoUpdate({
+          target: [
+            personalRecords.userId,
+            personalRecords.kind,
+            personalRecords.exerciseId,
+            personalRecords.benchmarkId,
+            personalRecords.distanceKey,
+            personalRecords.workoutId,
+            personalRecords.activityId,
+            personalRecords.algorithmVersion,
+          ],
+          // A late finish on a system-closed row re-runs with the sets synced since: the PR of
+          // this workout can only rise (best of all its sets, same baseline).
+          set: {
+            value: best.e1rmKg,
+            reps: best.reps,
+            achievedAt: best.completedAt,
+            previousValue: previous,
+          },
+        });
       log.info("pr.detected", { userId, workoutId: w.id, kind: "e1rm" });
     }
   }
+  return { outcome: "done" };
 }

@@ -184,8 +184,13 @@ export async function deleteAccountAction(confirmation: string): Promise<void> {
   redirect("/login");
 }
 
+/**
+ * Deliberately the one action without requireUser(): it only ends the caller's own session
+ * (cookies of this request), so it must stay reachable from the error boundaries — an account
+ * outside ALLOWED_EMAILS, or a broken environment, makes requireUser() throw and would otherwise
+ * leave no way out.
+ */
 export async function signOutAction(): Promise<void> {
-  await requireUser();
   if (env().AUTH_MODE === "supabase") {
     const supabase = await supabaseServerClient();
     await supabase.auth.signOut();

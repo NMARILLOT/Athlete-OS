@@ -17,8 +17,10 @@ import { GarminMockProvider } from "@/server/providers/garmin/mock";
 import {
   GARMIN_IMPORT_VERSION,
   InvalidFitError,
+  RUN_PR_ALGORITHM_VERSION,
   activityTitle,
   getActivityDetail,
+  importActivityDetails,
   importFitFile,
   listActivities,
   modalityForSport,
@@ -33,9 +35,15 @@ import { analysisRowFromProfile } from "@/server/services/workout.service";
  */
 const USER_A = "00000000-0000-4000-8000-0000000000a7";
 const USER_B = "00000000-0000-4000-8000-0000000000b7";
+/** 5 km test provenance (spec §57, §70). */
+const USER_C = "00000000-0000-4000-8000-0000000000c7";
+/** Simulated data never touches the measured ledger (spec §14, §70, ADR-023). */
+const USER_D = "00000000-0000-4000-8000-0000000000d7";
 const TZ = "Europe/Paris";
 const userA = { id: USER_A, timezone: TZ };
 const userB = { id: USER_B, timezone: TZ };
+const userC = { id: USER_C, timezone: TZ };
+const userD = { id: USER_D, timezone: TZ };
 
 const N = Profile.MesgNum as Record<string, number>;
 type AnyMesg = Parameters<Encoder["onMesg"]>[1];
@@ -151,6 +159,8 @@ beforeAll(async () => {
   await handle.db.insert(schema.users).values([
     { id: USER_A, email: "a-activities@example.test", timezone: TZ },
     { id: USER_B, email: "b-activities@example.test", timezone: TZ },
+    { id: USER_C, email: "c-activities@example.test", timezone: TZ },
+    { id: USER_D, email: "d-activities@example.test", timezone: TZ },
   ]);
   await seedCatalog(handle.db);
   // A manual LTHR so zones can be derived once (spec §16, never 220 − age).
@@ -665,12 +675,19 @@ describe("syncGarminActivities", () => {
     expect(raws.every((r) => r.dedupeKey.startsWith("garmin:activity:"))).toBe(true);
     expect(raws.every((r) => r.parserVersion === GARMIN_IMPORT_VERSION)).toBe(true);
 
-    // Records and tests derived from the mock never claim a measured GARMIN source.
+    // Simulated data never enters the PR ledger or the test log — nothing celebrated, nothing
+    // that could later retire a measured record (spec §14, §70, ADR-023).
+    expect(first.prs).toEqual([]);
     const prs = await db()
       .select({ source: schema.personalRecords.source })
       .from(schema.personalRecords)
       .where(eq(schema.personalRecords.userId, USER_B));
-    expect(prs.every((p) => p.source === "MOCK")).toBe(true);
+    expect(prs).toHaveLength(0);
+    const tests = await db()
+      .select({ id: schema.testResults.id })
+      .from(schema.testResults)
+      .where(eq(schema.testResults.userId, USER_B));
+    expect(tests).toHaveLength(0);
   });
 
   it("stores no realised intensity for an unmatched activity when no zone was resolved", async () => {
@@ -708,6 +725,192 @@ describe("syncGarminActivities", () => {
     expect(detail?.streams.hr?.length ?? 0).toBeLessThanOrEqual(600);
     // Garmin fixtures have no zone set for user B (no LTHR): honest "no zones", not 220 − age.
     expect(detail?.zones).toBeNull();
+  });
+});
+
+/** A planned "Test 5 km" (preset) on `date`: `linkPlannedWorkout` matches it by date + modality. */
+async function planTest5k(userId: string, date: string) {
+  const preset = CARDIO_PRESETS.test_run_5k;
+  const [w] = await db()
+    .insert(schema.workouts)
+    .values({
+      userId,
+      type: "cardio",
+      source: "planned_user",
+      status: "planned",
+      date,
+      plannedDurationMin: 45,
+      title: preset.title,
+      plannedIntensity: "hard",
+      intensitySource: "USER",
+      expectedRpe: 9,
+    })
+    .returning();
+  if (!w) throw new Error("workout insert failed");
+  await db().insert(schema.cardioWorkouts).values({
+    userId,
+    workoutId: w.id,
+    modality: preset.modality,
+    workoutKind: preset.kind,
+    steps: preset.steps,
+  });
+  return w;
+}
+
+describe("recordTest5k (spec §57, §70)", () => {
+  const testRows = (userId: string) =>
+    db()
+      .select()
+      .from(schema.testResults)
+      .where(
+        and(eq(schema.testResults.userId, userId), eq(schema.testResults.testKey, "test_run_5k")),
+      )
+      .orderBy(schema.testResults.date);
+
+  it("uses the PR detector's boundaries: exact ≤ 1 % over, pro-rated estimate beyond, nothing beyond 15 %", async () => {
+    const w1 = await planTest5k(USER_C, "2026-11-02");
+    const w2 = await planTest5k(USER_C, "2026-11-03");
+    const w3 = await planTest5k(USER_C, "2026-11-04");
+
+    // 5.05 km in 25:00 — within 1 % of the distance: the time is the test itself.
+    const near = await importFitFile(
+      db(),
+      userC,
+      buildRunFit({ start: "2026-11-02T07:00:00Z", durationSec: 1500, speedMps: 5050 / 1500 }),
+      "test-5k-505.fit",
+    );
+    expect(near.workoutId).toBe(w1.id);
+    // 5.12 km in 25:00 — beyond 1 %: pro-rated, i.e. an estimate the athlete never ran.
+    const over = await importFitFile(
+      db(),
+      userC,
+      buildRunFit({ start: "2026-11-03T07:00:00Z", durationSec: 1500, speedMps: 5120 / 1500 }),
+      "test-5k-512.fit",
+    );
+    expect(over.workoutId).toBe(w2.id);
+    // 8 km (warm-up + test + cool-down recorded as one activity): the average pace says nothing
+    // about the 5 km — no test is invented from it.
+    const whole = await importFitFile(
+      db(),
+      userC,
+      buildRunFit({ start: "2026-11-04T07:00:00Z", durationSec: 2400, speedMps: 8000 / 2400 }),
+      "test-5k-whole-session.fit",
+    );
+    expect(whole.workoutId).toBe(w3.id); // still linked and done, just no test result
+
+    const rows = await testRows(USER_C);
+    expect(rows).toHaveLength(2);
+    const [exact, estimated] = rows;
+    expect(exact).toMatchObject({
+      date: "2026-11-02",
+      value: Math.round((1500 * 5000) / 5050),
+      unit: "s",
+      source: "DEVICE",
+      confidence: "HIGH",
+      algorithmVersion: null,
+      activityId: near.activityId,
+      workoutId: w1.id,
+    });
+    expect(exact?.conditions).toMatchObject({ distanceM: 5050 });
+    expect(estimated).toMatchObject({
+      date: "2026-11-03",
+      value: Math.round((1500 * 5000) / 5120),
+      source: "DEVICE",
+      confidence: "MEDIUM",
+      algorithmVersion: RUN_PR_ALGORITHM_VERSION,
+      activityId: over.activityId,
+      workoutId: w2.id,
+    });
+    expect(rows.some((r) => r.activityId === whole.activityId)).toBe(false);
+
+    // The PR written from the very same runs agrees with the test's exact/estimated verdict.
+    const prs = await db()
+      .select({
+        activityId: schema.personalRecords.activityId,
+        estimated: schema.personalRecords.estimated,
+      })
+      .from(schema.personalRecords)
+      .where(
+        and(
+          eq(schema.personalRecords.userId, USER_C),
+          eq(schema.personalRecords.distanceKey, "5k"),
+        ),
+      );
+    expect(prs.find((p) => p.activityId === near.activityId)?.estimated).toBe(false);
+    expect(prs.find((p) => p.activityId === over.activityId)?.estimated).toBe(true);
+    expect(prs.some((p) => p.activityId === whole.activityId)).toBe(false);
+  });
+});
+
+describe("simulated provenance (garmin_mock)", () => {
+  it("never lets a simulated run set or supersede a measured record, nor log a test", async () => {
+    const date = "2026-11-05";
+    // A measured 5 km record (25:00) and a planned "Test 5 km" that the mock run will be linked to.
+    await db()
+      .insert(schema.personalRecords)
+      .values({
+        userId: USER_D,
+        kind: "time",
+        distanceKey: "5k",
+        value: 1500,
+        unit: "s",
+        achievedAt: new Date("2026-10-20T07:00:00Z"),
+        source: "DEVICE",
+      });
+    const w = await planTest5k(USER_D, date);
+
+    // A simulated 5.05 km in 23:20 — faster than the measured record.
+    const result = await importActivityDetails(
+      db(),
+      userD,
+      {
+        externalId: `mock-${date}-running`,
+        sport: "running",
+        subSport: null,
+        startTime: `${date}T07:10:00+01:00`,
+        utcOffsetSec: 3600,
+        durationSec: 1400,
+        distanceM: 5050,
+        avgHr: 172,
+        maxHr: 184,
+        avgSpeedMps: 5050 / 1400,
+        raw: { source: "mock", date, sport: "running" },
+        laps: [],
+        streams: { sampleIntervalSec: 5 },
+      },
+      {
+        provider: "garmin_mock",
+        dedupeKey: `garmin:activity:mock-${date}-running`,
+        parserVersion: GARMIN_IMPORT_VERSION,
+        rawKind: "activity",
+      },
+    );
+    expect(result.duplicate).toBe(false);
+    // Still importable, visible and linked to the day's plan (spec §14) …
+    expect(result.workoutId).toBe(w.id);
+    const [a] = await db()
+      .select({ provider: schema.activities.provider, workoutId: schema.activities.workoutId })
+      .from(schema.activities)
+      .where(eq(schema.activities.id, result.activityId));
+    expect(a).toEqual({ provider: "garmin_mock", workoutId: w.id });
+    // … but nothing is celebrated, nothing enters the ledger and the measured record stays current.
+    expect(result.prs).toEqual([]);
+    const prs = await db()
+      .select()
+      .from(schema.personalRecords)
+      .where(eq(schema.personalRecords.userId, USER_D));
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toMatchObject({
+      source: "DEVICE",
+      value: 1500,
+      superseded: false,
+      previousValue: null,
+    });
+    const tests = await db()
+      .select({ id: schema.testResults.id })
+      .from(schema.testResults)
+      .where(eq(schema.testResults.userId, USER_D));
+    expect(tests).toHaveLength(0);
   });
 });
 

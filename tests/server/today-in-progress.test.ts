@@ -8,8 +8,10 @@ import { getTodayView } from "@/server/services/today.service";
 vi.mock("server-only", () => ({}));
 
 /**
- * A strength session started days ago and never closed (phone died) must keep its "Reprendre"
- * entry point on Today until it is finished — otherwise it stays in_progress forever, invisible.
+ * A strength session started days ago and never closed (phone died) keeps its "Reprendre" entry
+ * point on Today until it is finished — by the athlete, or by the daily sweep once it has been
+ * inactive for a day (`closeStaleInProgress`, tests/server/daily.test.ts). It must never be
+ * invisible in the meantime.
  */
 const USER: CurrentUser = {
   id: "00000000-0000-4000-8000-0000000000d1",

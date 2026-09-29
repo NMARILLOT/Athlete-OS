@@ -557,4 +557,300 @@ describe("strength session service", () => {
     expect(prs[0]?.value).toBeCloseTo(145.8, 0);
     expect(prs[0]?.previousValue).toBe(140);
   });
+
+  it("never drops a finish because of its duration: a multi-day wall-clock is replaced by start → last set", async () => {
+    const db = handle.db;
+    const { workoutId } = await createStrengthWorkoutFromTemplate(db, USER_A, {
+      templateId: "lower_a",
+      date: TODAY,
+    });
+    const wx = await firstExercise(workoutId);
+    // "Terminer" tapped 25 h after the start (session resumed the next day).
+    const res = await applyStrengthEvents(
+      db,
+      USER_A,
+      fullSession(
+        workoutId,
+        wx.id,
+        [uuid(80), uuid(81), uuid(82)],
+        { reps: 5, weightKg: 100, setId: uuid(83) },
+        { rpe: 8, durationMin: 1500 },
+      ),
+    );
+    expect(res.acknowledged).toEqual([uuid(80), uuid(81), uuid(82)]);
+    expect(res.finishedWorkoutIds).toEqual([workoutId]);
+    const [w] = await db.select().from(schema.workouts).where(eq(schema.workouts.id, workoutId));
+    expect(w?.status).toBe("done");
+    expect(w?.rpe).toBe(8);
+    expect(w?.feeling).toBe("good");
+    // start 17:00 → last set 17:10, not 1500 min × RPE 8 fed to the load.
+    expect(w?.actualDurationMin).toBe(10);
+    expect(w?.sessionRpeLoad).toBe(80);
+  });
+
+  it("keeps a finish whose durationMin is garbage and falls back to the planned duration without a set", async () => {
+    const db = handle.db;
+    const { workoutId } = await createStrengthWorkoutFromTemplate(db, USER_A, {
+      templateId: "upper_a",
+      date: TODAY,
+    });
+    const res = await applyStrengthEvents(db, USER_A, [
+      {
+        id: uuid(84),
+        workoutId,
+        seq: 0,
+        type: "session_started",
+        payload: { date: TODAY, startedAt: "2026-09-28T10:00:00.000Z" },
+        at: "2026-09-28T10:00:00.000Z",
+      },
+      {
+        id: uuid(85),
+        workoutId,
+        seq: 1,
+        type: "session_finished",
+        payload: { finishedAt: "2026-09-30T10:00:00.000Z", rpe: 6, durationMin: "x" },
+        at: "2026-09-30T10:00:00.000Z",
+      },
+    ]);
+    expect(res.finishedWorkoutIds).toEqual([workoutId]);
+    const [w] = await db.select().from(schema.workouts).where(eq(schema.workouts.id, workoutId));
+    expect(w?.status).toBe("done");
+    expect(w?.rpe).toBe(6);
+    expect(w?.actualDurationMin).toBe(60); // upper_a planned duration
+    expect(w?.sessionRpeLoad).toBe(360);
+  });
+
+  it("applies a batch in the order received: a re-seeded session's earlier finish cannot close the original one", async () => {
+    const db = handle.db;
+    const { workoutId } = await createStrengthWorkoutFromTemplate(db, USER_A, {
+      templateId: "lower_a",
+      date: TODAY,
+    });
+    const wx = await firstExercise(workoutId);
+    const set = (id: string, seq: number, setId: string, weightKg: number, at: string) =>
+      ({
+        id,
+        workoutId,
+        seq,
+        type: "set_completed",
+        payload: {
+          set: {
+            id: setId,
+            workoutExerciseId: wx.id,
+            setIndex: 1,
+            reps: 5,
+            weightKg,
+            completedAt: at,
+            clientUpdatedAt: at,
+          },
+        },
+        at,
+      }) satisfies OutboxEventInput;
+    // Original session (seq 1..4, finished offline), then the same workout re-seeded from its
+    // cached shell (seq 1..3) — queued in that order, flushed in one batch.
+    const original: OutboxEventInput[] = [
+      {
+        id: uuid(90),
+        workoutId,
+        seq: 1,
+        type: "session_started",
+        payload: { date: TODAY, startedAt: "2026-09-28T17:00:00.000Z" },
+        at: "2026-09-28T17:00:00.000Z",
+      },
+      set(uuid(91), 2, uuid(92), 100, "2026-09-28T17:10:00.000Z"),
+      set(uuid(93), 3, uuid(94), 105, "2026-09-28T17:20:00.000Z"),
+      {
+        id: uuid(95),
+        workoutId,
+        seq: 4,
+        type: "session_finished",
+        payload: {
+          finishedAt: "2026-09-28T18:00:00.000Z",
+          rpe: 8,
+          feeling: "good",
+          painReported: false,
+          durationMin: 60,
+        },
+        at: "2026-09-28T18:00:00.000Z",
+      },
+    ];
+    const reseeded: OutboxEventInput[] = [
+      {
+        id: uuid(96),
+        workoutId,
+        seq: 1,
+        type: "session_started",
+        payload: { date: TODAY, startedAt: "2026-09-28T19:00:00.000Z" },
+        at: "2026-09-28T19:00:00.000Z",
+      },
+      set(uuid(97), 2, uuid(98), 20, "2026-09-28T19:05:00.000Z"),
+      {
+        id: uuid(99),
+        workoutId,
+        seq: 3,
+        type: "session_finished",
+        payload: { finishedAt: "2026-09-28T19:06:00.000Z", rpe: 3, durationMin: 1 },
+        at: "2026-09-28T19:06:00.000Z",
+      },
+    ];
+    const res = await applyStrengthEvents(db, USER_A, [...original, ...reseeded]);
+    expect(res.acknowledged).toHaveLength(7);
+    expect(res.finishedWorkoutIds).toEqual([workoutId]);
+    const [w] = await db.select().from(schema.workouts).where(eq(schema.workouts.id, workoutId));
+    expect(w?.status).toBe("done");
+    expect(w?.rpe).toBe(8);
+    expect(w?.actualDurationMin).toBe(60);
+    expect(w?.sessionRpeLoad).toBe(480);
+    const sets = await db
+      .select()
+      .from(schema.strengthSets)
+      .where(eq(schema.strengthSets.workoutId, workoutId));
+    expect(sets).toHaveLength(3); // the stray set is kept, only the outcome is protected
+  });
+
+  it("reverts a never-performed session (no working set, no RPE) to planned and lets it start again", async () => {
+    const db = handle.db;
+    const { workoutId } = await createStrengthWorkoutFromTemplate(db, USER_A, {
+      templateId: "lower_a",
+      date: TODAY,
+    });
+    // "Démarrer" on the wrong workout, then "Abandonner l'autre et démarrer" from the chooser.
+    const res = await applyStrengthEvents(db, USER_A, [
+      {
+        id: uuid(100),
+        workoutId,
+        seq: 1,
+        type: "session_started",
+        payload: { date: TODAY, startedAt: "2026-09-28T17:00:00.000Z" },
+        at: "2026-09-28T17:00:00.000Z",
+      },
+      {
+        id: uuid(101),
+        workoutId,
+        seq: 2,
+        type: "session_finished",
+        payload: {
+          finishedAt: "2026-09-28T17:03:00.000Z",
+          rpe: null,
+          feeling: null,
+          painReported: false,
+          durationMin: 3,
+        },
+        at: "2026-09-28T17:03:00.000Z",
+      },
+    ]);
+    expect(res.finishedWorkoutIds).toEqual([workoutId]);
+    const [w] = await db.select().from(schema.workouts).where(eq(schema.workouts.id, workoutId));
+    expect(w?.status).toBe("planned");
+    expect(w?.startAt).toBeNull();
+    expect(w?.finishedAt).toBeNull();
+    expect(w?.actualDurationMin).toBeNull();
+    expect(w?.sessionRpeLoad).toBeNull();
+    expect(w?.realisedIntensity).toBeNull();
+    const analyses = await db
+      .select()
+      .from(schema.workoutAnalyses)
+      .where(eq(schema.workoutAnalyses.workoutId, workoutId));
+    expect(analyses.map((a) => a.phase)).toEqual(["planned"]);
+    const prs = await db
+      .select()
+      .from(schema.personalRecords)
+      .where(eq(schema.personalRecords.workoutId, workoutId));
+    expect(prs).toHaveLength(0);
+    // Not closed: the athlete can start it for real later.
+    await applyStrengthEvents(db, USER_A, [
+      {
+        id: uuid(102),
+        workoutId,
+        seq: 3,
+        type: "session_started",
+        payload: { date: TODAY, startedAt: "2026-09-29T17:00:00.000Z" },
+        at: "2026-09-29T17:00:00.000Z",
+      },
+    ]);
+    const [again] = await db
+      .select()
+      .from(schema.workouts)
+      .where(eq(schema.workouts.id, workoutId));
+    expect(again?.status).toBe("in_progress");
+    expect(again?.startAt?.toISOString()).toBe("2026-09-29T17:00:00.000Z");
+  });
+
+  it("realises the intensity from the declared RPE and never below the planned band", async () => {
+    const db = handle.db;
+    const unrated = async (templateId: string, rpe: number, base: number) => {
+      const { workoutId } = await createStrengthWorkoutFromTemplate(db, USER_A, {
+        templateId,
+        date: TODAY,
+      });
+      const wx = await firstExercise(workoutId);
+      await applyStrengthEvents(db, USER_A, [
+        {
+          id: uuid(base),
+          workoutId,
+          seq: 1,
+          type: "session_started",
+          payload: { date: TODAY, startedAt: "2026-09-28T17:00:00.000Z" },
+          at: "2026-09-28T17:00:00.000Z",
+        },
+        {
+          id: uuid(base + 1),
+          workoutId,
+          seq: 2,
+          type: "set_completed",
+          payload: {
+            set: {
+              id: uuid(base + 2),
+              workoutExerciseId: wx.id,
+              setIndex: 1,
+              reps: 5,
+              weightKg: 80,
+              rpe: null,
+              quality: null, // Facile / Parfait / Dur never tapped
+              completedAt: "2026-09-28T17:10:00.000Z",
+              clientUpdatedAt: "2026-09-28T17:10:00.000Z",
+            },
+          },
+          at: "2026-09-28T17:10:00.000Z",
+        },
+        {
+          id: uuid(base + 3),
+          workoutId,
+          seq: 3,
+          type: "session_finished",
+          payload: {
+            finishedAt: "2026-09-28T18:00:00.000Z",
+            rpe,
+            feeling: "good",
+            painReported: false,
+            durationMin: 60,
+          },
+          at: "2026-09-28T18:00:00.000Z",
+        },
+      ]);
+      const [w] = await db.select().from(schema.workouts).where(eq(schema.workouts.id, workoutId));
+      const [actual] = await db
+        .select()
+        .from(schema.workoutAnalyses)
+        .where(
+          and(
+            eq(schema.workoutAnalyses.workoutId, workoutId),
+            eq(schema.workoutAnalyses.phase, "actual"),
+          ),
+        );
+      return { w, actual };
+    };
+    // lower_a is planned hard: an unrated RPE-9 session stays hard and counts as heavy strength.
+    const hard = await unrated("lower_a", 9, 110);
+    expect(hard.w?.plannedIntensity).toBe("hard");
+    expect(hard.w?.realisedIntensity).toBe("hard");
+    expect(hard.w?.intensitySource).toBe("CALCULATED");
+    expect(hard.actual?.intensity).toBe("hard");
+    expect(hard.actual?.heavyStrength).toBe(true);
+    // upper_a is planned moderate: a light RPE-5 session is not downgraded below the plan.
+    const moderate = await unrated("upper_a", 5, 120);
+    expect(moderate.w?.realisedIntensity).toBe("moderate");
+    expect(moderate.actual?.intensity).toBe("moderate");
+    expect(moderate.actual?.heavyStrength).toBe(false);
+  });
 });

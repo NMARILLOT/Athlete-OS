@@ -51,7 +51,11 @@ export const wodInboxItems = userOwnedTable(
   ],
 );
 
-/** `ai_invocations` — audit + cache of every Layer B call, keyed by prompt version and input hash. */
+/**
+ * `ai_invocations` — audit + cache of every Layer B call, keyed by prompt version and input hash.
+ * Only *valid* rows are unique per key (the reusable cache); failed attempts insert freely so each
+ * one counts toward the daily cap (ADR-022).
+ */
 export const aiInvocations = userOwnedTable(
   "ai_invocations",
   {
@@ -68,5 +72,9 @@ export const aiInvocations = userOwnedTable(
     tokensIn: integer("tokens_in").notNull().default(0),
     tokensOut: integer("tokens_out").notNull().default(0),
   },
-  (t) => [uniqueIndex("ai_invocations_cache_uq").on(t.kind, t.promptVersion, t.model, t.inputHash)],
+  (t) => [
+    uniqueIndex("ai_invocations_cache_uq")
+      .on(t.kind, t.promptVersion, t.model, t.inputHash)
+      .where(sql`${t.valid} = true`),
+  ],
 );

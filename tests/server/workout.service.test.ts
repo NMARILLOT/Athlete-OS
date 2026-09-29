@@ -5,6 +5,7 @@ import { seedCatalog } from "@/db/seed";
 import { createTestDb, type TestDb } from "@/db/test-db";
 import { getCatalogEntry } from "@/domain/engine";
 import { analyzeWod, NormalizedWodSchema, parseWodText, type NormalizedWod } from "@/domain/wod";
+import { assembleEngineInput } from "@/server/services/engine-input";
 import { recompute } from "@/server/services/recommendation.service";
 import { createStrengthWorkoutFromTemplate } from "@/server/services/strength-session.service";
 import {
@@ -14,6 +15,7 @@ import {
   createWorkoutFromOption,
   findOpenWorkoutForOption,
   logQuickWorkout,
+  measuredBandFromActivities,
   optionFromCatalog,
   realisedBandFromFeedback,
   routeForWorkout,
@@ -379,6 +381,264 @@ describe("completeWorkout", () => {
     expect((await actualRow(w.id))?.algorithmVersion).toBe("activity_v1");
   });
 
+  it("fills the null band of an imported activity without zones from the RPE and re-derives it on re-feedback", async () => {
+    // As createDoneWorkout stores a run for a user without LTHR: band null (nothing measured),
+    // an activity_v1 actual row at the synthetic "easy" prior, and the linked activity row.
+    const [w] = await handle.db
+      .insert(schema.workouts)
+      .values({
+        userId: USER_A,
+        type: "cardio",
+        source: "garmin",
+        status: "done",
+        date: "2026-09-25",
+        startAt: new Date("2026-09-25T06:00:00.000Z"),
+        actualDurationMin: 40,
+        title: "Course",
+        plannedIntensity: null,
+        realisedIntensity: null,
+        intensitySource: "CALCULATED",
+        finishedAt: new Date("2026-09-25T06:40:00.000Z"),
+        sessionRpeLoad: null,
+      })
+      .returning();
+    if (!w) throw new Error("insert failed");
+    await handle.db.insert(schema.workoutAnalyses).values({
+      userId: USER_A,
+      workoutId: w.id,
+      phase: "actual",
+      date: "2026-09-25",
+      loadVector: {
+        cardiovascular: 2.5,
+        muscular_lower: 2,
+        muscular_upper: 0,
+        impact: 3,
+        eccentric: 1,
+        technical: 0,
+      },
+      stimulusCredits: { aerobic_easy: 0.5 },
+      intensity: "easy",
+      heavyStrength: false,
+      source: "CALCULATED",
+      algorithmVersion: "cardio_builder_v1+activity_v1",
+      confidence: "LOW",
+    });
+    await handle.db.insert(schema.activities).values({
+      userId: USER_A,
+      provider: "fit_import",
+      fingerprint: "running|29856000",
+      sport: "running",
+      startAt: new Date("2026-09-25T06:00:00.000Z"),
+      localDate: "2026-09-25",
+      durationSec: 2400,
+      avgHr: 178,
+      parserVersion: "fit_v1",
+      workoutId: w.id,
+    });
+    await completeWorkout(handle.db, USER_A, {
+      workoutId: w.id,
+      rpe: 9,
+      feeling: "too_hard",
+      painReported: false,
+      now: new Date("2026-09-25T08:00:00.000Z"),
+      timezone: TZ,
+    });
+    const row = await workoutRow(w.id);
+    expect(row).toMatchObject({
+      rpe: 9,
+      realisedIntensity: "hard",
+      intensitySource: "CALCULATED",
+      actualDurationMin: 40,
+      sessionRpeLoad: 360,
+    });
+    const actual = await actualRow(w.id);
+    expect(actual?.intensity).toBe("hard");
+    expect(actual?.algorithmVersion).toBe("cardio_builder_v1+activity_v1");
+    expect(actual?.loadVector.cardiovascular).toBe(2.5);
+    // The engine counts a maximal effort as hard, not as the "easy" prior.
+    const input = await assembleEngineInput(handle.db, USER_A, {
+      now: new Date("2026-09-26T07:00:00.000Z"),
+      timezone: TZ,
+    });
+    expect(input.history.find((s) => s.id === w.id)).toMatchObject({ intensity: "hard", rpe: 9 });
+    // Nothing measured the band: a corrected RPE re-derives it instead of keeping the first one.
+    await completeWorkout(handle.db, USER_A, {
+      workoutId: w.id,
+      rpe: 4,
+      feeling: "good",
+      painReported: false,
+      now: new Date("2026-09-25T09:00:00.000Z"),
+      timezone: TZ,
+    });
+    expect(await workoutRow(w.id)).toMatchObject({ rpe: 4, realisedIntensity: "easy" });
+    expect((await actualRow(w.id))?.intensity).toBe("easy");
+  });
+
+  it("lets a corrected lower RPE bring the band back to the plan: an RPE upgrade is never a floor", async () => {
+    const feedback = (workoutId: string, rpe: number, hour: number) =>
+      completeWorkout(handle.db, USER_B, {
+        workoutId,
+        rpe,
+        feeling: "good",
+        painReported: false,
+        now: new Date(`2026-09-25T${String(hour).padStart(2, "0")}:00:00.000Z`),
+        timezone: TZ,
+      });
+    const create = (kind: string, startMinute: number) => {
+      const option = optionFromCatalog(kind);
+      if (!option) throw new Error("catalog");
+      return createWorkoutFromOption(handle.db, USER_B, {
+        option,
+        date: "2026-09-25",
+        timezone: TZ,
+        recommendationId: null,
+        startMinute,
+      });
+    };
+    // Zone 2 run (cardio 2.5, easy): a mis-tapped RPE 9 upgrades it, the corrected RPE 4 undoes it.
+    const easy = await create("run_easy_45", 8 * 60);
+    await feedback(easy.id, 9, 10);
+    expect(await workoutRow(easy.id)).toMatchObject({
+      realisedIntensity: "moderate",
+      intensitySource: "CALCULATED",
+    });
+    expect((await actualRow(easy.id))?.intensity).toBe("moderate");
+    await feedback(easy.id, 4, 11);
+    expect(await workoutRow(easy.id)).toMatchObject({
+      rpe: 4,
+      realisedIntensity: "easy",
+      intensitySource: "ENGINE",
+    });
+    expect((await actualRow(easy.id))?.intensity).toBe("easy");
+    // Invariant on any kind: RPE 9 then RPE 4 ends exactly where a fresh RPE 4 feedback ends (twin).
+    const corrected = await create("run_long_90", 12 * 60);
+    const twin = await create("run_long_90", 15 * 60);
+    await feedback(corrected.id, 9, 14);
+    expect((await workoutRow(corrected.id)).realisedIntensity).toBe("hard");
+    await feedback(corrected.id, 4, 17);
+    await feedback(twin.id, 4, 17);
+    const [a, b] = [await workoutRow(corrected.id), await workoutRow(twin.id)];
+    expect(a.realisedIntensity).not.toBe("hard");
+    expect(a.realisedIntensity).toBe(b.realisedIntensity);
+    expect(a.intensitySource).toBe(b.intensitySource);
+    expect((await actualRow(corrected.id))?.intensity).toBe((await actualRow(twin.id))?.intensity);
+  });
+
+  it("keeps the band measured by a linked activity's HR zones as the floor across feedbacks", async () => {
+    const option = optionFromCatalog("run_long_90");
+    if (!option) throw new Error("catalog");
+    const created = await createWorkoutFromOption(handle.db, USER_B, {
+      option,
+      date: "2026-09-24",
+      timezone: TZ,
+      recommendationId: null,
+      startMinute: 7 * 60,
+    });
+    const [zoneSet] = await handle.db
+      .insert(schema.hrZoneSets)
+      .values({
+        userId: USER_B,
+        validFrom: "2026-09-01",
+        method: "lthr",
+        lthr: 165,
+        zones: [
+          { zone: 1, minBpm: 0, maxBpm: 139 },
+          { zone: 2, minBpm: 140, maxBpm: 150 },
+          { zone: 3, minBpm: 151, maxBpm: 160 },
+          { zone: 4, minBpm: 161, maxBpm: 170 },
+          { zone: 5, minBpm: 171, maxBpm: 220 },
+        ],
+        source: "USER",
+        confidence: "MEDIUM",
+      })
+      .returning();
+    if (!zoneSet) throw new Error("zone set insert failed");
+    // As linkPlannedWorkout stores it: 25 min in Z3 → measured "moderate" over an "easy" plan.
+    const [planned] = await handle.db
+      .select()
+      .from(schema.workoutAnalyses)
+      .where(eq(schema.workoutAnalyses.workoutId, created.id));
+    if (!planned) throw new Error("planned analysis missing");
+    await handle.db
+      .update(schema.workouts)
+      .set({
+        status: "done",
+        actualDurationMin: 90,
+        realisedIntensity: "moderate",
+        intensitySource: "CALCULATED",
+        finishedAt: new Date("2026-09-24T06:30:00.000Z"),
+      })
+      .where(eq(schema.workouts.id, created.id));
+    await handle.db.insert(schema.workoutAnalyses).values({
+      userId: USER_B,
+      workoutId: created.id,
+      phase: "actual",
+      date: "2026-09-24",
+      loadVector: planned.loadVector,
+      stimulusCredits: planned.stimulusCredits,
+      intensity: "moderate",
+      heavyStrength: false,
+      source: "CALCULATED",
+      algorithmVersion: `${planned.algorithmVersion}+actual_scaling_v1`,
+      confidence: "MEDIUM",
+    });
+    const timeInZones = { z1: 10, z2: 30, z3: 25, z4: 5, z5: 0 };
+    await handle.db.insert(schema.activities).values({
+      userId: USER_B,
+      provider: "fit_import",
+      fingerprint: "running|29854560",
+      sport: "running",
+      startAt: new Date("2026-09-24T05:00:00.000Z"),
+      localDate: "2026-09-24",
+      durationSec: 5400,
+      avgHr: 156,
+      zoneSetId: zoneSet.id,
+      timeInZones,
+      parserVersion: "fit_v1",
+      workoutId: created.id,
+    });
+    expect(
+      measuredBandFromActivities([{ zoneSetId: zoneSet.id, timeInZones, durationSec: 5400 }], null),
+    ).toBe("moderate");
+    // Too few zone minutes (< half the duration) or no zone set: nothing measured.
+    expect(
+      measuredBandFromActivities(
+        [{ zoneSetId: zoneSet.id, timeInZones: { ...timeInZones, z2: 0 }, durationSec: 5400 }],
+        null,
+      ),
+    ).toBeNull();
+    expect(
+      measuredBandFromActivities([{ zoneSetId: null, timeInZones, durationSec: 5400 }], null),
+    ).toBeNull();
+
+    const feedback = (rpe: number, hour: number) =>
+      completeWorkout(handle.db, USER_B, {
+        workoutId: created.id,
+        rpe,
+        feeling: "good",
+        painReported: false,
+        now: new Date(`2026-09-24T${String(hour).padStart(2, "0")}:00:00.000Z`),
+        timezone: TZ,
+      });
+    // A low RPE never lowers a measured band …
+    await feedback(4, 8);
+    expect(await workoutRow(created.id)).toMatchObject({
+      realisedIntensity: "moderate",
+      intensitySource: "CALCULATED",
+    });
+    // … a high RPE upgrades it …
+    await feedback(9, 9);
+    expect((await workoutRow(created.id)).realisedIntensity).toBe("hard");
+    expect((await actualRow(created.id))?.intensity).toBe("hard");
+    // … and a corrected RPE returns to the measured band, not to the plan's "easy".
+    await feedback(4, 10);
+    expect(await workoutRow(created.id)).toMatchObject({
+      realisedIntensity: "moderate",
+      intensitySource: "CALCULATED",
+    });
+    expect((await actualRow(created.id))?.intensity).toBe("moderate");
+  });
+
   it("persists a declared duration and re-scales its own actual analysis on a second feedback", async () => {
     const option = optionFromCatalog("run_easy_45");
     if (!option) throw new Error("catalog");
@@ -497,5 +757,42 @@ describe("START resolution", () => {
     );
     expect(routeForWorkout({ id: "x", type: "cardio" })).toBe("/train/cardio/x");
     expect(routeForWorkout({ id: "x", type: "crossfit", fixed: true })).toBe("/workouts/x");
+  });
+});
+
+describe("skipWorkout on a live session", () => {
+  it("refuses to skip an in_progress strength workout (a finish is the only exit)", async () => {
+    const { createTestDb } = await import("@/db/test-db");
+    const { seedCatalog } = await import("@/db/seed");
+    const schema = await import("@/db/schema");
+    const { skipWorkout } = await import("@/server/services/workout.service");
+    const { ValidationError } = await import("@/server/errors");
+    const { eq } = await import("drizzle-orm");
+    const h = await createTestDb();
+    try {
+      const userId = "00000000-0000-4000-8000-0000000000e9";
+      await h.db.insert(schema.users).values({ id: userId, email: "e9@example.test" });
+      await seedCatalog(h.db);
+      const [w] = await h.db
+        .insert(schema.workouts)
+        .values({
+          userId,
+          type: "strength",
+          source: "planned_user",
+          status: "in_progress",
+          date: "2026-09-29",
+          title: "Strength — Lower",
+          startAt: new Date("2026-09-29T17:00:00Z"),
+        })
+        .returning({ id: schema.workouts.id });
+      await expect(skipWorkout(h.db, userId, w!.id)).rejects.toBeInstanceOf(ValidationError);
+      const [after] = await h.db
+        .select({ status: schema.workouts.status })
+        .from(schema.workouts)
+        .where(eq(schema.workouts.id, w!.id));
+      expect(after?.status).toBe("in_progress");
+    } finally {
+      await h.close();
+    }
   });
 });

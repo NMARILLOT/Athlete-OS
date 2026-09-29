@@ -19,6 +19,9 @@ import {
  * identical inputs (same kind / prompt version / model / input hash) reuse the stored valid output
  * instead of spending again, and each kind has a per-user cap over a rolling 24 h window. A capped
  * call throws `AiCapExceededError`; callers degrade to the deterministic parsers (never a blocker).
+ * A provider that degraded to its heuristic fallback (timeout, refusal, schema rejection) is audited
+ * as a *failed* attempt under its own key (`valid = false`, never reused, one row per attempt), so
+ * every retry of a flaky model counts toward the cap.
  */
 
 const DEFAULT_DAILY_CAPS: Record<AiInvocationMeta["kind"], number> = {
@@ -129,6 +132,40 @@ export async function assertUnderDailyCap(
   }
 }
 
+/**
+ * Audit one provider call: its own result when the provider answered, else — the result carries the
+ * fallback's meta (`provider` differs) — a failed attempt under the provider's `key` with no output.
+ * The unique cache index only covers valid rows, so repeated failures each insert and count.
+ */
+async function auditCall(
+  db: Db,
+  userId: string,
+  providerName: AiInvocationMeta["provider"],
+  key: AiCallKey,
+  res: AiResult<unknown>,
+  startedAt: number,
+): Promise<void> {
+  if (res.meta.provider === providerName) {
+    await recordInvocation(db, userId, res.meta, res.output, true, null);
+    return;
+  }
+  log.warn("ai.provider_fallback", { userId, kind: key.kind, provider: providerName });
+  await recordInvocation(
+    db,
+    userId,
+    {
+      ...key,
+      latencyMs: Date.now() - startedAt,
+      tokensIn: 0,
+      tokensOut: 0,
+      provider: providerName,
+    },
+    null,
+    false,
+    `provider fallback: ${res.meta.provider}/${res.meta.model} output used`,
+  );
+}
+
 function reusedMeta(key: AiCallKey): AiInvocationMeta {
   return {
     ...key,
@@ -154,8 +191,9 @@ export async function parseWodGuarded(
   const cached = NormalizedWodSchema.safeParse(await findValidOutput(db, key));
   if (cached.success) return { output: cached.data, meta: reusedMeta(key), reused: true };
   await assertUnderDailyCap(db, userId, "parse_wod", { now: opts.now });
+  const startedAt = Date.now();
   const res = await provider.parseWod(input);
-  await recordInvocation(db, userId, res.meta, res.output, true, null);
+  await auditCall(db, userId, provider.name, key, res, startedAt);
   return { ...res, reused: false };
 }
 
@@ -180,7 +218,8 @@ export async function parseIntentGuarded(
   const cached = StoredIntentSchema.safeParse(await findValidOutput(db, key));
   if (cached.success) return { output: cached.data, meta: reusedMeta(key), reused: true };
   await assertUnderDailyCap(db, userId, "parse_intent", { now: opts.now });
+  const startedAt = Date.now();
   const res = await provider.parseIntent(input);
-  await recordInvocation(db, userId, res.meta, res.output, true, null);
+  await auditCall(db, userId, provider.name, key, res, startedAt);
   return { ...res, reused: false };
 }

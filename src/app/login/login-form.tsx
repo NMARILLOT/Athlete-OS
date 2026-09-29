@@ -9,12 +9,14 @@ import { supabaseBrowser } from "@/lib/supabase-browser";
 /**
  * Email + password, or a 6-digit email OTP typed in-app — no magic links (they open in Safari's
  * separate storage silo on an installed iOS PWA, ARCHITECTURE §7). Sign-ups are disabled server-side.
- * `?next=` is only honoured as a same-origin path (open-redirect guard).
+ * `?next=` is only honoured as a same-origin path (open-redirect guard). `?reason=forbidden` is set
+ * by the proxy after it signed out an account outside ALLOWED_EMAILS, so the refusal is explained.
  */
 export function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
   const next = safeNextPath(params.get("next"));
+  const forbidden = params.get("reason") === "forbidden";
   const [mode, setMode] = useState<"password" | "otp" | "otp-verify">("password");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -69,6 +71,14 @@ export function LoginForm() {
 
   return (
     <form onSubmit={submit} className="flex flex-col gap-3">
+      {forbidden ? (
+        <p role="alert" className="rounded-xl border border-border bg-bg-elevated p-3 text-sm">
+          <span className="font-medium">Ce compte n&apos;est pas autorisé.</span>{" "}
+          <span className="text-fg-muted">
+            La session a été fermée : connecte-toi avec un compte autorisé.
+          </span>
+        </p>
+      ) : null}
       <label className="flex flex-col gap-1">
         <span className="text-sm text-fg-muted">Email</span>
         <input

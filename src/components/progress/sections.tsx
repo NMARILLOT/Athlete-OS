@@ -440,7 +440,7 @@ export function EngineSection({
     const colour = paletteAt(i);
     return {
       key: `pace-${g.comparableGroup}`,
-      label: `${describeComparableGroup(g.comparableGroup)} (mesuré)`,
+      label: `${describeComparableGroup(g.comparableGroup)} (${g.simulated ? "simulé" : "mesuré"})`,
       stroke: colour.stroke,
       fill: colour.fill,
       scatter: true,

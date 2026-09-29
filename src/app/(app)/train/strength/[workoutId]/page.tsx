@@ -40,5 +40,5 @@ export default async function StrengthSessionPage({
   } catch (err) {
     if (!(err instanceof NotFoundError)) throw err;
   }
-  return <StrengthSessionShell bundle={bundle} workoutId={workoutId} />;
+  return <StrengthSessionShell bundle={bundle} workoutId={workoutId} userId={user.id} />;
 }

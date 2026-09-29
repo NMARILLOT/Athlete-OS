@@ -48,6 +48,11 @@ export function GarminSyncButton({ providerName }: { providerName: "mock" | "off
             {result.prs.length ? (
               <span className="mt-1 block font-medium text-accent">{result.prs.join(" · ")}</span>
             ) : null}
+            {providerName === "mock" && result.imported > 0 ? (
+              <span className="mt-1 block text-xs text-fg-subtle">
+                Données simulées : aucun record ni test n&apos;est enregistré.
+              </span>
+            ) : null}
           </p>
         ) : (
           <p role="alert" className="text-sm text-danger">

@@ -13,7 +13,7 @@ import {
 } from "@/domain/wod";
 import { NotFoundError, ValidationError } from "@/server/errors";
 import { log } from "@/server/logging";
-import { parseWodGuarded } from "./ai-invocations.service";
+import { AiCapExceededError, parseWodGuarded } from "./ai-invocations.service";
 import { bestE1rmsByExercise } from "./strength-session.service";
 import { createCrossfitWorkoutFromWod } from "./workout.service";
 import type { InboxItemView } from "./view-models";
@@ -97,7 +97,8 @@ export async function createInboxItem(
 /**
  * Parse (AI or heuristic) + deterministic analysis. Status: parsed (≥ 0.7) or needs_review. The
  * provider call goes through `parseWodGuarded` (stored-output reuse, daily cap, audit row); a
- * capped or failed call degrades to the heuristic parser.
+ * capped or failed call degrades to the heuristic parser and says so in the WOD's warnings (the
+ * athlete must learn the model was skipped — the cap message is the one ADR-022 documents).
  */
 export async function parseInboxItem(
   db: Db,
@@ -128,7 +129,16 @@ export async function parseInboxItem(
       inboxItemId: itemId,
       errorName: err instanceof Error ? err.name : "unknown",
     });
-    wod = parseWodText(item.rawText);
+    const heuristic = parseWodText(item.rawText);
+    wod = {
+      ...heuristic,
+      warnings: [
+        ...heuristic.warnings,
+        err instanceof AiCapExceededError
+          ? err.message
+          : "Analyse IA indisponible : structure heuristique.",
+      ],
+    };
     confidence = wod.parseConfidence;
   }
   const e1rms = await bestE1rmsByExercise(db, userId);

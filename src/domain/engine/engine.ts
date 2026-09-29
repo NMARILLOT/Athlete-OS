@@ -401,6 +401,7 @@ export function runEngine(input: EngineInput, options: EngineOptions = {}): Reco
 
   // Reschedule today's planned free session if it is not the primary.
   for (const p of ctx.todayPlannedFree) {
+    if (p.status === "in_progress") continue; // a started session is never proposed for a move
     if (primary.candidate.plannedId === p.id) continue;
     const r = rescheduleSession(ctx, p, primary.candidate.kind);
     reschedules.push(r);
@@ -428,12 +429,14 @@ export function runEngine(input: EngineInput, options: EngineOptions = {}): Reco
     }
   }
   if (!input.readiness) askFor.push("readiness");
+  // A coaching session carries no athlete RPE by design (its load is exact, not estimated).
   const missingRpe = input.history.filter(
     (s) =>
       s.date >= addDays(ctx.today, -2) &&
       s.rpe == null &&
       s.type !== "rest" &&
-      s.type !== "mobility",
+      s.type !== "mobility" &&
+      s.type !== "coach_session",
   );
   if (missingRpe.length) {
     askFor.push("rpe");

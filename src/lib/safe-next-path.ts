@@ -2,7 +2,8 @@
  * Post-login redirect target taken from `?next=`. Only a same-origin absolute path is accepted
  * (open-redirect guard): `https://evil.example`, `//evil.example`, `/\evil.example` and any value
  * carrying control characters (which the URL parser would strip into one of those forms) fall back.
- * The proxy and the (app) pages only ever emit plain pathnames, so nothing legitimate is lost.
+ * The proxy emits `pathname + search` and the (app) pages plain pathnames, so nothing legitimate
+ * is lost; the result is a path (query and hash kept) to resolve with `new URL(path, origin)`.
  */
 export const DEFAULT_NEXT_PATH = "/today";
 

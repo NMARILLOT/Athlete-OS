@@ -33,8 +33,9 @@ export function plannedIsHard(p: PlannedSession): boolean {
   return p.profile?.intensity === "hard";
 }
 
+/** A coaching session feeds residual fatigue only: never the athlete's own (primary) session. */
 function isPrimaryLevel(s: HistorySession): boolean {
-  if (s.type === "rest" || s.type === "mobility") return false;
+  if (s.type === "rest" || s.type === "mobility" || s.type === "coach_session") return false;
   if (
     s.family === "walk" ||
     s.family === "mobility" ||

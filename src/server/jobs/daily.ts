@@ -1,5 +1,5 @@
 import "server-only";
-import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { strengthSets, syncJobs, users, workouts } from "@/db/schema";
 import { addDays } from "@/domain/core/dates";
@@ -7,8 +7,14 @@ import { errorFields, log } from "@/server/logging";
 import { withdrawStaleIntents } from "@/server/services/readiness.service";
 import { recompute } from "@/server/services/recommendation.service";
 import { completeCardio } from "@/server/services/cardio.service";
-import { finishStrengthWorkout } from "@/server/services/strength-session.service";
+import {
+  effectiveStrengthDurationMin,
+  finishStrengthWorkout,
+} from "@/server/services/strength-session.service";
 import { localDate } from "@/server/time";
+
+/** A session with no activity (start or logged set) for this long is over, whatever its plan date. */
+const STALE_AFTER_MS = 24 * 3600_000;
 
 /**
  * Daily dispatcher (ARCHITECTURE §4): for every user, recompute today's recommendation (+ week
@@ -28,7 +34,7 @@ export async function runDailyJobs(
       await withdrawStaleIntents(db, u.id, today);
       // A session left "in progress" for more than a day is over: close it with what was logged
       // (never an invented RPE — the engine then asks for it via MISSING_RPE).
-      await closeStaleInProgress(db, u.id, today);
+      await closeStaleInProgress(db, u.id, today, now);
       await recompute(db, u.id, { now, timezone: u.timezone, date: today });
       recomputed++;
     } catch (err) {
@@ -40,11 +46,21 @@ export async function runDailyJobs(
 }
 
 /**
- * Close strength / cardio workouts still `in_progress` before yesterday. Strength: finished at the
- * last logged set (duration = start → last set, else the planned duration); cardio: planned duration.
- * RPE and feeling stay null so the athlete is nudged, and nothing is invented (spec §15).
+ * Close strength / cardio workouts still `in_progress` before yesterday **and** without activity
+ * for a day: a missed planned session started today (or resumed and being logged right now) keeps
+ * its plan date, so the sweep keys on `start_at` / the last logged set, never on the date alone.
+ * Strength: finished at the last logged set (duration = start → last set, else the planned
+ * duration); a session with no working set goes back to `planned` (never performed). Cardio:
+ * planned duration. RPE and feeling stay null so the athlete is nudged, and nothing is invented
+ * (spec §15).
  */
-export async function closeStaleInProgress(db: Db, userId: string, today: string): Promise<number> {
+export async function closeStaleInProgress(
+  db: Db,
+  userId: string,
+  today: string,
+  now: Date,
+): Promise<number> {
+  const inactiveSince = new Date(now.getTime() - STALE_AFTER_MS);
   const stale = await db
     .select()
     .from(workouts)
@@ -54,6 +70,7 @@ export async function closeStaleInProgress(db: Db, userId: string, today: string
         eq(workouts.status, "in_progress"),
         inArray(workouts.type, ["strength", "cardio"]),
         lt(workouts.date, addDays(today, -1)),
+        or(isNull(workouts.startAt), lt(workouts.startAt, inactiveSince)),
       ),
     );
   let closed = 0;
@@ -66,14 +83,17 @@ export async function closeStaleInProgress(db: Db, userId: string, today: string
           .where(and(eq(strengthSets.workoutId, w.id), eq(strengthSets.userId, userId)))
           .orderBy(desc(strengthSets.completedAt))
           .limit(1);
+        // Still being logged (a session resumed days after its start): not stale.
+        if (lastSet && lastSet.completedAt > inactiveSince) continue;
         const startAt = w.startAt ?? new Date(`${w.date}T12:00:00Z`);
         const finishedAt = lastSet?.completedAt ?? startAt;
-        const measuredMin = Math.round((finishedAt.getTime() - startAt.getTime()) / 60_000);
-        const durationMin =
-          lastSet && measuredMin >= 1 && measuredMin <= 240
-            ? measuredMin
-            : (w.plannedDurationMin ?? 45);
-        await finishStrengthWorkout(db, userId, {
+        const durationMin = effectiveStrengthDurationMin({
+          declaredMin: null,
+          startAt,
+          lastSetAt: lastSet?.completedAt ?? null,
+          plannedDurationMin: w.plannedDurationMin,
+        });
+        const { outcome } = await finishStrengthWorkout(db, userId, {
           workout: w,
           finishedAt,
           durationMin,
@@ -82,6 +102,10 @@ export async function closeStaleInProgress(db: Db, userId: string, today: string
           painReported: false,
           notes: w.notes,
         });
+        if (outcome === "reverted") {
+          log.info("cron.stale_session_reverted", { userId, workoutId: w.id, kind: w.type });
+          continue;
+        }
       } else {
         await completeCardio(db, userId, {
           workoutId: w.id,

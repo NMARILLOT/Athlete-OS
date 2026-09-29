@@ -8,8 +8,8 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { formatKg } from "@/lib/format";
 import {
+  bindStrengthSessionOwner,
   hasPendingEvents,
-  rehydrateStrengthSession,
   suggestDecision,
   useStrengthSession,
   type StrengthBundle,
@@ -28,9 +28,17 @@ import { FinishSheet } from "./finish-sheet";
  */
 type Phase = "loading" | "active" | "conflict" | "syncing" | "closed" | "none";
 
-function resolvePhase(bundle: StrengthBundle | null, workoutId: string): Phase {
+function resolvePhase(bundle: StrengthBundle | null, workoutId: string, userId: string): Phase {
   const st = useStrengthSession.getState();
-  const live = st.session;
+  // A snapshot of another account is never displayed (bindStrengthSessionOwner already dropped it).
+  const live = st.ownerUserId != null && st.ownerUserId !== userId ? null : st.session;
+  const serverClosed = bundle?.status === "done" || bundle?.status === "skipped";
+  if (serverClosed && live?.workoutId === workoutId && !live.finishedAt) {
+    // Closed server-side meanwhile (daily sweep, "Sauter"): the client is authoritative only while
+    // in_progress (§4.2). Drop the local session; its queued set events still flush and are kept.
+    st.clearSession();
+    return "closed";
+  }
   if (live && live.workoutId === workoutId) {
     if (!live.finishedAt) return "active";
     if (hasPendingEvents(workoutId)) return "syncing";
@@ -42,7 +50,7 @@ function resolvePhase(bundle: StrengthBundle | null, workoutId: string): Phase {
   // A finished session of another workout: its queued events stay in the global outbox.
   if (live) st.clearSession();
   if (!bundle) return "none";
-  if (bundle.status === "done" || bundle.status === "skipped") return "closed";
+  if (serverClosed) return "closed";
   if (bundle.status === "in_progress") st.resumeSession(bundle);
   else st.startSession(bundle);
   return "active";
@@ -55,9 +63,12 @@ function resolvePhase(bundle: StrengthBundle | null, workoutId: string): Phase {
 export function StrengthSessionShell({
   bundle,
   workoutId,
+  userId,
 }: {
   bundle: StrengthBundle | null;
   workoutId: string;
+  /** The signed-in athlete: the persisted session is bound to its owner (ARCHITECTURE §4.6). */
+  userId: string;
 }) {
   const router = useRouter();
   const st = useStrengthSession();
@@ -70,15 +81,16 @@ export function StrengthSessionShell({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      await rehydrateStrengthSession();
+      // Rehydrates once per page lifetime and drops a snapshot left by another account.
+      await bindStrengthSessionOwner(userId);
       if (cancelled) return;
-      setPhase(resolvePhase(bundle, workoutId));
+      setPhase(resolvePhase(bundle, workoutId, userId));
       void useStrengthSession.getState().flushOutbox();
     })();
     return () => {
       cancelled = true;
     };
-  }, [bundle, workoutId]);
+  }, [bundle, workoutId, userId]);
 
   // Ask the service worker to precache this shell (and its return routes) for cold offline starts.
   useEffect(() => {
@@ -192,15 +204,14 @@ export function StrengthSessionShell({
   }, [restLeft, session?.restEndsAt, chime]);
 
   // A queued finish that gets acknowledged (global flusher, `online`, "Réessayer") closes the
-  // session here too: subscribe to the store and move to "closed" once nothing is pending.
+  // session here too. Driven by the rendered `pendingHere`, after commit — never from inside a
+  // store subscriber: zustand notifies synchronously, so a `clearSession()` in the listener
+  // re-enters itself until the stack overflows and the flush rejects. `view` already renders
+  // "closed"; this only releases the finished session so the next mount does not re-seed it.
   useEffect(() => {
-    if (phase !== "syncing") return;
-    return useStrengthSession.subscribe(() => {
-      if (hasPendingEvents(workoutId)) return;
-      useStrengthSession.getState().clearSession();
-      setPhase("closed");
-    });
-  }, [phase, workoutId]);
+    if (phase !== "syncing" || pendingHere) return;
+    useStrengthSession.getState().clearSession();
+  }, [phase, pendingHere]);
 
   if (view === "loading")
     return <p className="py-10 text-center text-fg-muted">Chargement de la séance…</p>;
@@ -266,13 +277,18 @@ export function StrengthSessionShell({
   }
 
   if (view === "conflict" && session) {
+    const otherSets = session.sets.filter((s) => !s.isWarmup).length;
+    // No working set: the other session was never performed. Its finish (no RPE, no set) sends the
+    // workout back to `planned` server-side instead of a done workout with an invented load.
+    const abandon = otherSets === 0;
     return (
       <div className="py-6">
         <PageHeader title="Séance en cours" closeHref="/today" />
         <p className="text-lg font-semibold">Une autre séance est déjà en cours.</p>
         <p className="mt-1 text-sm text-fg-muted">
-          « {session.title} » ({session.sets.filter((s) => !s.isWarmup).length} série(s)) n&apos;a
-          pas été terminée. Reprends-la, ou termine-la sans ressenti avant de démarrer celle-ci.
+          {abandon
+            ? `« ${session.title} » a été démarrée sans aucune série. Reprends-la, ou abandonne-la (elle redevient planifiée) avant de démarrer celle-ci.`
+            : `« ${session.title} » (${otherSets} série(s)) n'a pas été terminée. Reprends-la, ou termine-la sans ressenti avant de démarrer celle-ci.`}
         </p>
         <div className="mt-4 flex flex-col gap-2">
           <Button
@@ -293,11 +309,15 @@ export function StrengthSessionShell({
               s.finishSession({ rpe: null, feeling: null, painReported: false, notes: "" });
               await s.flushOutbox();
               useStrengthSession.getState().clearSession();
-              setPhase(resolvePhase(bundle, workoutId));
+              setPhase(resolvePhase(bundle, workoutId, userId));
               setBusy(false);
             }}
           >
-            {busy ? "…" : "Terminer l'autre puis démarrer"}
+            {busy
+              ? "…"
+              : abandon
+                ? "Abandonner l'autre et démarrer"
+                : "Terminer l'autre puis démarrer"}
           </Button>
         </div>
       </div>

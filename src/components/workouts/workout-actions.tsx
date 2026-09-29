@@ -138,9 +138,9 @@ export function WorkoutActions(w: WorkoutActionsProps) {
         </Link>
       ) : null}
 
-      {open || w.status === "in_progress" ? (
+      {open ? (
         <div className="flex flex-col gap-2">
-          {!open ? null : w.type === "strength" ? (
+          {w.type === "strength" ? (
             <Link
               href={`/train/strength/${w.id}`}
               className="flex h-14 items-center justify-center rounded-2xl bg-accent text-lg font-semibold text-accent-fg"

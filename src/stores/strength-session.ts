@@ -132,6 +132,11 @@ interface StrengthState {
   hydrated: boolean;
   session: Session | null;
   outbox: OutboxEvent[];
+  /**
+   * The athlete this snapshot belongs to (ARCHITECTURE §4.6): a session/outbox persisted under one
+   * account is never posted, displayed or resumed under another one on the same device.
+   */
+  ownerUserId: string | null;
   flushing: boolean;
   lastFlushError: string | null;
   // lifecycle
@@ -192,6 +197,19 @@ function nowIso(): string {
 /** The batch currently being posted, so concurrent flush calls chain instead of racing. */
 let inflight: Promise<void> | null = null;
 
+/** The signed-in athlete, published by the (app) layout (`SessionOwner`); null outside the app. */
+let currentOwner: string | null = null;
+
+/** A persisted snapshot owned by another account than the current one (or by an unknown one). */
+function isForeignSnapshot(ownerUserId: string | null): boolean {
+  return ownerUserId != null && ownerUserId !== currentOwner;
+}
+
+/** Next `seq` for a (re-)seeded session: continue after the events still queued for this workout. */
+function queuedSeq(outbox: OutboxEvent[], workoutId: string): number {
+  return outbox.reduce((m, e) => (e.workoutId === workoutId && e.seq > m ? e.seq : m), 0);
+}
+
 /** Full deterministic autoload decision (rule id + spec-worded rationale, spec §79). */
 export function suggestDecision(ex: SessionExercise): ProgressionDecision {
   return decideProgression({
@@ -241,6 +259,7 @@ export const useStrengthSession = create<StrengthState>()(
         hydrated: false,
         session: null,
         outbox: [],
+        ownerUserId: null,
         flushing: false,
         lastFlushError: null,
 
@@ -248,6 +267,7 @@ export const useStrengthSession = create<StrengthState>()(
           requestPersistentStorage();
           const working: Record<string, number | null> = {};
           for (const ex of bundle.exercises) working[ex.id] = suggestWeight(ex);
+          const st = get();
           const session: Session = {
             workoutId: bundle.workoutId,
             title: bundle.title,
@@ -261,10 +281,10 @@ export const useStrengthSession = create<StrengthState>()(
             workingWeightKg: working,
             restEndsAt: null,
             restTotalSec: 0,
-            seq: 0,
+            seq: queuedSeq(st.outbox, bundle.workoutId),
             finish: null,
           };
-          set({ session });
+          set({ session, ownerUserId: currentOwner ?? st.ownerUserId });
           push("session_started", {
             workoutId: bundle.workoutId,
             templateId: bundle.templateId,
@@ -308,6 +328,7 @@ export const useStrengthSession = create<StrengthState>()(
             if (own.length < ex.prescription.sets && i < currentExerciseIndex)
               currentExerciseIndex = i;
           }
+          const st = get();
           const session: Session = {
             workoutId: bundle.workoutId,
             title: bundle.title,
@@ -321,10 +342,10 @@ export const useStrengthSession = create<StrengthState>()(
             workingWeightKg: working,
             restEndsAt: null,
             restTotalSec: 0,
-            seq: 0,
+            seq: queuedSeq(st.outbox, bundle.workoutId),
             finish: null,
           };
-          set({ session });
+          set({ session, ownerUserId: currentOwner ?? st.ownerUserId });
         },
 
         resumeOrNull: () => get().session,
@@ -530,6 +551,8 @@ export const useStrengthSession = create<StrengthState>()(
           }
           const st = get();
           if (st.outbox.length === 0) return;
+          // Another account's (or an unknown owner's) queue is never posted under this cookie.
+          if (isForeignSnapshot(st.ownerUserId)) return;
           if (typeof navigator !== "undefined" && navigator.onLine === false) {
             set({ lastFlushError: "offline" });
             return;
@@ -573,7 +596,12 @@ export const useStrengthSession = create<StrengthState>()(
       name: STRENGTH_SESSION_STORAGE_KEY,
       storage: createJSONStorage(() => idbStorage),
       skipHydration: true,
-      partialize: (st) => ({ session: st.session, outbox: st.outbox }) as unknown as StrengthState,
+      partialize: (st) =>
+        ({
+          session: st.session,
+          outbox: st.outbox,
+          ownerUserId: st.ownerUserId,
+        }) as unknown as StrengthState,
     },
   ),
 );
@@ -597,12 +625,50 @@ export function hasPendingEvents(workoutId: string): boolean {
   return useStrengthSession.getState().outbox.some((e) => e.workoutId === workoutId);
 }
 
+/** The athlete currently published as owner of this device's session store (null outside the app). */
+export function strengthSessionOwner(): string | null {
+  return currentOwner;
+}
+
+/**
+ * Bind the store to the signed-in athlete (called by the (app) layout's `SessionOwner` and by the
+ * strength shell before it resolves its phase; `null` when leaving the app):
+ *  - a snapshot without owner (first run, legacy) is adopted by this account;
+ *  - a snapshot owned by another account is foreign: it is neither posted nor displayed, and is
+ *    dropped when another athlete signs in on the same device (ARCHITECTURE §4.6).
+ * Idempotent and safe to await from several places: it shares the single rehydration.
+ */
+export async function bindStrengthSessionOwner(userId: string | null): Promise<void> {
+  currentOwner = userId;
+  if (!userId) return;
+  await rehydrateStrengthSession();
+  if (currentOwner !== userId) return; // superseded meanwhile (navigation, strict-mode remount)
+  const st = useStrengthSession.getState();
+  if (st.ownerUserId === userId) return;
+  if (st.ownerUserId == null) {
+    useStrengthSession.setState({ ownerUserId: userId });
+    return;
+  }
+  // Foreign: another athlete signed in on this device — drop it and start clean for this account.
+  useStrengthSession.setState({
+    session: null,
+    outbox: [],
+    ownerUserId: userId,
+    lastFlushError: null,
+  });
+}
+
 /**
  * Sign-out / account deletion (ARCHITECTURE §4.6, §7): the persisted session and outbox belong to
  * the signed-in athlete and must not survive into another account on the same device.
  */
 export async function clearStrengthSessionStorage(): Promise<void> {
-  useStrengthSession.setState({ session: null, outbox: [], lastFlushError: null });
+  useStrengthSession.setState({
+    session: null,
+    outbox: [],
+    ownerUserId: null,
+    lastFlushError: null,
+  });
   try {
     await idbDel(STRENGTH_SESSION_STORAGE_KEY);
   } catch {

@@ -7,6 +7,8 @@ import { z } from "zod";
  *  - DATABASE_URL is mandatory in production (PGlite is dev/test only).
  *  - ALLOWED_EMAILS must list at least one address in production (supabase mode): an empty
  *    allow-list would admit every account of the Supabase project.
+ *  - A blank value (`KEY=` as shipped by .env.example, which Next's loader sets to "") counts as
+ *    unset, so defaults apply and optional validators (`.url()`, `.email()`, enums) do not reject "".
  */
 const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
 const truthyFlag = (v: string | undefined) => v === "true" || v === "1" || v === "on";
@@ -112,7 +114,7 @@ let cached: Env | null = null;
 
 export function env(): Env {
   if (cached) return cached;
-  const parsed = EnvSchema.safeParse(process.env);
+  const parsed = EnvSchema.safeParse(withoutBlankValues(process.env));
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
     throw new Error(`Invalid server environment — ${issues}`);
@@ -134,10 +136,22 @@ export function allowedEmails(): string[] {
   return parseEmailList(env().ALLOWED_EMAILS);
 }
 
-/** Comma-separated list → trimmed, lower-cased, non-empty entries (so "," is an empty list). */
-function parseEmailList(raw: string | undefined): string[] {
+/**
+ * Comma-separated list → trimmed, lower-cased, non-empty entries (so "," is an empty list).
+ * Shared with src/proxy.ts, which reads ALLOWED_EMAILS from process.env without the full parse.
+ */
+export function parseEmailList(raw: string | undefined): string[] {
   return (raw ?? "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
+}
+
+/** `KEY=` lines behave like unset keys: the fail-closed checks already treat "" and undefined alike. */
+function withoutBlankValues(source: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined && value !== "") out[key] = value;
+  }
+  return out;
 }

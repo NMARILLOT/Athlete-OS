@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 import { errorMessage, FormError } from "@/components/profile/controls";
 import { clearClientCaches } from "@/components/pwa/client-cache";
+import { isNextRedirect } from "@/lib/next-redirect";
 
 const CONFIRM_WORD = "SUPPRIMER";
 
@@ -48,13 +49,20 @@ export function DataTools({ authMode }: { authMode: "local" | "supabase" }) {
   function deleteNow() {
     setDeleteError(null);
     startDelete(async () => {
+      // Server first: the per-device caches (service-worker pages, IndexedDB strength session and
+      // outbox) are wiped only once the account is really gone — a failed deletion must not cost
+      // an unsynced session (ARCHITECTURE §4.6). The action ends with redirect(), which Next
+      // surfaces as a NEXT_REDIRECT rejection while still navigating: that is success.
       try {
-        await clearClientCaches();
         await deleteAccountAction(word);
-        router.replace("/login");
       } catch (e) {
-        setDeleteError(errorMessage(e));
+        if (!isNextRedirect(e)) {
+          setDeleteError(errorMessage(e));
+          return;
+        }
       }
+      await clearClientCaches();
+      router.replace("/login");
     });
   }
 

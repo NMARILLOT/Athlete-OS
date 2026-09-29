@@ -115,6 +115,13 @@ function recordSourceFor(provider: ActivityProvider): DataSource {
   return "DEVICE";
 }
 
+/**
+ * Simulated activities stay importable and visible (spec §14) but never enter the PR ledger or the
+ * test log: a mock value must never retire a GARMIN/DEVICE record, seed `previous_value` or feed the
+ * threshold estimate as if the athlete had run it (spec §70, ADR-023).
+ */
+const isSimulatedProvider = (provider: ActivityProvider): boolean => provider === "garmin_mock";
+
 export interface ImportUser {
   id: string;
   timezone: string;
@@ -899,6 +906,8 @@ async function detectRunPrs(
   workoutId: string | null,
 ): Promise<string[]> {
   if (a.modality !== "running" || !isPositive(a.distanceM) || !isPositive(a.durationSec)) return [];
+  // Never a record (nor a supersede) from simulated data — the measured ledger stays measured.
+  if (isSimulatedProvider(a.provider)) return [];
   const source = recordSourceFor(a.provider);
   const out: string[] = [];
   for (const d of RUN_DISTANCES) {
@@ -953,17 +962,25 @@ async function detectRunPrs(
   return out;
 }
 
-/** A planned "Test 5 km" realised by a ≥ 5 km run → `test_results.test_run_5k` (spec §57). */
+/**
+ * A planned "Test 5 km" realised by a 5 km run → `test_results.test_run_5k` (spec §57). Same
+ * distance window and exact/estimated boundary as `detectRunPrs`: up to 1 % over the distance the
+ * time is the test (HIGH, no algorithm); beyond it the time is pro-rated, i.e. an estimate the
+ * athlete never ran (MEDIUM + algorithm version, spec §70); beyond 15 % (a warm-up + test +
+ * cool-down recording of 7–8 km) the average pace says nothing about the test → nothing stored.
+ */
 async function recordTest5k(
   db: Db,
   userId: string,
   a: NormalisedActivity,
   workout: { id: string; title: string } | null,
 ): Promise<void> {
-  if (!workout || a.modality !== "running" || !isPositive(a.distanceM)) return;
-  if (!/test\s*5/i.test(workout.title) || a.distanceM < 5000) return;
+  if (!workout || a.modality !== "running") return;
+  if (!isPositive(a.distanceM) || !isPositive(a.durationSec)) return;
+  if (isSimulatedProvider(a.provider) || !/test\s*5/i.test(workout.title)) return;
+  if (a.distanceM < 5000 || a.distanceM > 5000 * PR_MAX_DISTANCE_RATIO) return;
   const timeSec = Math.round((a.durationSec * 5000) / a.distanceM);
-  const exact = a.distanceM <= 5000 * 1.03;
+  const exact = a.distanceM <= 5000 * PR_EXACT_DISTANCE_RATIO;
   await db
     .insert(testResults)
     .values({
@@ -1221,7 +1238,7 @@ export async function importActivityDetails(
         }
       }
 
-      // (h) PRs and tests.
+      // (h) PRs and tests — never from simulated data (`garmin_mock`).
       prs = await detectRunPrs(tx, user.id, normalised, workoutId);
       await recordTest5k(tx, user.id, normalised, linked);
     }

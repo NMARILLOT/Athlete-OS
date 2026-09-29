@@ -6,7 +6,7 @@ import { ENGINE_VERSION, projectWeek, runEngine, type Recommendation } from "@/d
 import type { IsoDate } from "@/domain/core/dates";
 import { log } from "@/server/logging";
 import { localDate } from "@/server/time";
-import { assembleEngineInput, ENGINE_PLANNED_STATUSES } from "./engine-input";
+import { assembleEngineInput } from "./engine-input";
 import { moveWorkout } from "./workout.service";
 
 export interface StoredRecommendation {
@@ -140,6 +140,23 @@ export async function getRecommendation(
   };
 }
 
+/**
+ * The recommendation a START refers to: the client's id when that row is the user's and dated
+ * `date` (a Today tab left open overnight still holds yesterday's id, whose options may no longer
+ * exist), else the current one for `date`.
+ */
+export async function resolveRecommendation(
+  db: Db,
+  userId: string,
+  opts: { recommendationId: string | null; date: IsoDate },
+): Promise<StoredRecommendation | null> {
+  const byId = opts.recommendationId
+    ? await getRecommendation(db, userId, opts.recommendationId)
+    : null;
+  if (byId && byId.date === opts.date) return byId;
+  return getCurrentRecommendation(db, userId, opts.date);
+}
+
 /** Idempotent fallback when the cron has not produced today's row (never the normal path). */
 export async function ensureTodayRecommendation(
   db: Db,
@@ -176,9 +193,11 @@ export interface PendingReschedule {
 
 /**
  * Engine reschedules (spec §32 "repositionner la force", §53 AUTO-ADJUSTED) still applicable: the
- * planned session is the user's, not fixed, still open and still on `fromDate`. Today renders them
- * as "Replanifié : <titre> → <date>" with an "Appliquer" action; the engine never moves a workout
- * by itself (ADR-017) — a reschedule is emitted whenever the planned session is merely outscored.
+ * planned session is the user's, not fixed, still planned (`planned` / `auto_adjusted` — a session
+ * already started is never listed nor moved, as the calendar's `checkMove` forbids it) and still on
+ * `fromDate`. Today renders them as "Replanifié : <titre> → <date>" with an "Appliquer" action; the
+ * engine never moves a workout by itself (ADR-017) — a reschedule is emitted whenever the planned
+ * session is merely outscored.
  */
 export async function pendingReschedules(
   db: Db,
@@ -197,7 +216,7 @@ export async function pendingReschedules(
     })
     .from(workouts)
     .where(and(eq(workouts.userId, userId), inArray(workouts.id, ids)));
-  const open: ReadonlySet<string> = new Set(ENGINE_PLANNED_STATUSES);
+  const open: ReadonlySet<string> = new Set(["planned", "auto_adjusted"]);
   return rec.reschedules.flatMap((r) => {
     const w = rows.find((x) => x.id === r.plannedId);
     if (!w || w.fixed || !open.has(w.status) || w.date !== r.fromDate) return [];

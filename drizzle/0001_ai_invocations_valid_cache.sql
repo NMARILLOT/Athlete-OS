@@ -1,0 +1,2 @@
+DROP INDEX "ai_invocations_cache_uq";--> statement-breakpoint
+CREATE UNIQUE INDEX "ai_invocations_cache_uq" ON "ai_invocations" USING btree ("kind","prompt_version","model","input_hash") WHERE "ai_invocations"."valid" = true;

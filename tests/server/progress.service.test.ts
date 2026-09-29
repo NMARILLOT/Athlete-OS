@@ -579,6 +579,7 @@ describe("getProgressView", () => {
           // Current `pace_at_hr` metric preferred (the superseded v0 row is ignored).
           { date: addDays(TODAY, -5), paceSecKm: 330, hrBand: "145–152", basis: "pace_at_hr" },
         ],
+        simulated: false, // measured FIT imports, never the mock
       },
       {
         comparableGroup: "easy_run_hilly_75_120min",
@@ -590,6 +591,7 @@ describe("getProgressView", () => {
             basis: "activity_average",
           },
         ],
+        simulated: false,
       },
     ]);
     // Current computed metric + the 5 km test converted with the documented factor (300 × 1.05).
@@ -653,6 +655,42 @@ describe("getProgressView", () => {
     expect(b.heatmap.patterns.find((p) => p.key === "squat")?.value).toBe(0);
     expect(b.crossfit.benchmarks).toEqual([]);
     expect(b.engine.tests).toEqual([]);
+  });
+
+  it("keeps simulated (garmin_mock) runs on the chart but flags their series as simulated", async () => {
+    // Spec §14: the mock's data flows through the product; spec §70: never shown as measured.
+    await handle.db.insert(schema.activities).values({
+      userId: USER_B,
+      provider: "garmin_mock",
+      fingerprint: "running|mock-1",
+      sport: "running",
+      startAt: new Date(`${addDays(TODAY, -3)}T07:00:00Z`),
+      localDate: addDays(TODAY, -3),
+      durationSec: 2700,
+      distanceM: 7900,
+      avgHr: 150,
+      avgPaceSecKm: 342,
+      parserVersion: "garmin_import_v1",
+      comparableGroup: "easy_run_flat_45_75min",
+    });
+    const b = await getProgressView(handle.db, USER_B, "4w", TODAY, { timezone: TZ });
+    expect(b.engine.paceAtHr).toEqual([
+      {
+        comparableGroup: "easy_run_flat_45_75min",
+        points: [
+          {
+            date: addDays(TODAY, -3),
+            paceSecKm: 342,
+            hrBand: "150–159",
+            basis: "activity_average",
+          },
+        ],
+        simulated: true,
+      },
+    ]);
+    // A's measured series are untouched by B's simulated run.
+    const a = await getProgressView(handle.db, USER_A, "4w", TODAY, { timezone: TZ });
+    expect(a.engine.paceAtHr.every((s) => s.simulated === false)).toBe(true);
   });
 
   it("resolves the `all` range from the earliest stored day and returns empties for a blank user", async () => {

@@ -50,6 +50,11 @@ export interface PaceAtHrPoint {
 export interface PaceAtHrSeries {
   comparableGroup: string;
   points: PaceAtHrPoint[];
+  /**
+   * At least one point comes from the development mock (`activities.provider = garmin_mock`): the
+   * series is simulated and must be labelled so, never "mesuré" (spec §14, §70, ADR-023).
+   */
+  simulated: boolean;
 }
 
 /** `ProgressView` with the pace @ HR trend split per comparable group. */
@@ -348,6 +353,7 @@ export async function getProgressView(
   // and a 2-h hilly long run are never plotted as one trend). The versioned `pace_at_hr` metric
   // (steady samples inside Z2) is preferred; otherwise the whole-activity average pace at the
   // average HR, and the point says which (`basis`). Activities without a group are not "comparable".
+  // Simulated activities (`garmin_mock`) stay on the chart (spec §14) but flag their series.
   const activityRows = await db
     .select({
       id: activities.id,
@@ -355,6 +361,7 @@ export async function getProgressView(
       avgHr: activities.avgHr,
       avgPaceSecKm: activities.avgPaceSecKm,
       comparableGroup: activities.comparableGroup,
+      provider: activities.provider,
     })
     .from(activities)
     .where(
@@ -392,7 +399,7 @@ export async function getProgressView(
   const paceMetricByActivity = new Map(
     paceMetricRows.flatMap((r) => (r.scopeId ? [[r.scopeId, r] as const] : [])),
   );
-  const pointsByGroup = new Map<string, PaceAtHrPoint[]>();
+  const pointsByGroup = new Map<string, { points: PaceAtHrPoint[]; simulated: boolean }>();
   for (const a of activityRows) {
     if (!a.comparableGroup || a.avgHr == null) continue;
     const metric = paceMetricByActivity.get(a.id);
@@ -416,12 +423,15 @@ export async function getProgressView(
       };
     }
     if (!point) continue;
-    pointsByGroup.set(a.comparableGroup, [...(pointsByGroup.get(a.comparableGroup) ?? []), point]);
+    const group = pointsByGroup.get(a.comparableGroup) ?? { points: [], simulated: false };
+    group.points.push(point);
+    if (a.provider === "garmin_mock") group.simulated = true;
+    pointsByGroup.set(a.comparableGroup, group);
   }
   // Most populated group first (the athlete's usual outing), then alphabetical for stability.
   const paceAtHr: PaceAtHrSeries[] = [...pointsByGroup.entries()]
-    .sort(([ga, pa], [gb, pb]) => pb.length - pa.length || (ga < gb ? -1 : 1))
-    .map(([comparableGroup, points]) => ({ comparableGroup, points }));
+    .sort(([ga, pa], [gb, pb]) => pb.points.length - pa.points.length || (ga < gb ? -1 : 1))
+    .map(([comparableGroup, { points, simulated }]) => ({ comparableGroup, points, simulated }));
 
   const thresholdRows = await db
     .select({ date: computedMetrics.date, value: computedMetrics.value })

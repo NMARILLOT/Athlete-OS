@@ -10,6 +10,7 @@ import {
   getRecommendation,
   pendingReschedules,
   recompute,
+  resolveRecommendation,
 } from "@/server/services/recommendation.service";
 import { createWorkoutFromOption, optionFromCatalog } from "@/server/services/workout.service";
 
@@ -94,9 +95,69 @@ describe("engine reschedules (spec §32 / §53)", () => {
     ).toEqual([]);
   });
 
+  it("never lists nor moves a session already started, as the calendar's checkMove forbids it", async () => {
+    const option = optionFromCatalog("strength_lower");
+    if (!option) throw new Error("catalog");
+    const started = await createWorkoutFromOption(handle.db, USER_B, {
+      option,
+      date: TODAY,
+      timezone: TZ,
+      recommendationId: null,
+      startMinute: 18 * 60,
+    });
+    await handle.db
+      .update(schema.workouts)
+      .set({ status: "in_progress" })
+      .where(eq(schema.workouts.id, started.id));
+    await declareReadiness(handle.db, USER_B, {
+      date: TODAY,
+      energy: 3,
+      soreness: 0,
+      motivation: 3,
+      unusualPain: false,
+    });
+    await declareIntent(handle.db, USER_B, { date: TODAY, kind: "want_run" });
+    const rec = await recompute(handle.db, USER_B, { now: NOW, timezone: TZ });
+    expect(rec.output.primary.family.startsWith("run")).toBe(true);
+    // Whether or not the engine proposes the move, nothing is pending nor applied for it.
+    const proposed = {
+      ...rec.output,
+      reschedules: [
+        { plannedId: started.id, fromDate: TODAY, toDate: "2026-09-30", reason: "test" },
+      ],
+    };
+    expect(await pendingReschedules(handle.db, USER_B, proposed)).toEqual([]);
+    expect(
+      (await applyReschedules(handle.db, USER_B, { timezone: TZ, today: TODAY })).applied,
+    ).toEqual([]);
+    const [row] = await handle.db
+      .select()
+      .from(schema.workouts)
+      .where(eq(schema.workouts.id, started.id));
+    expect(row).toMatchObject({ date: TODAY, status: "in_progress" });
+    expect(row?.startAt?.toISOString()).toBe("2026-09-28T16:00:00.000Z");
+  });
+
   it("reads a stored recommendation by id only for its owner", async () => {
     const rec = await recompute(handle.db, USER_A, { now: NOW, timezone: TZ });
     expect((await getRecommendation(handle.db, USER_A, rec.id))?.id).toBe(rec.id);
     expect(await getRecommendation(handle.db, USER_B, rec.id)).toBeNull();
+  });
+
+  it("resolves a START to today's recommendation, never to a stale (previous-day) id", async () => {
+    const yesterday = await recompute(handle.db, USER_A, {
+      now: new Date("2026-09-27T07:30:00.000Z"),
+      timezone: TZ,
+    });
+    expect(yesterday.date).toBe("2026-09-27");
+    const today = await recompute(handle.db, USER_A, { now: NOW, timezone: TZ });
+    const resolve = (userId: string, recommendationId: string | null) =>
+      resolveRecommendation(handle.db, userId, { recommendationId, date: TODAY });
+    expect((await resolve(USER_A, today.id))?.id).toBe(today.id);
+    // A Today tab left open overnight sends yesterday's id: today's current row answers instead.
+    expect((await resolve(USER_A, yesterday.id))?.id).toBe(today.id);
+    expect((await resolve(USER_A, null))?.id).toBe(today.id);
+    // Another user's id is not theirs to use.
+    expect((await resolve(USER_B, today.id))?.id).not.toBe(today.id);
   });
 });

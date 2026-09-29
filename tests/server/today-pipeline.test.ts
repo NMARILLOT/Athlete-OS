@@ -6,6 +6,7 @@ import { createTestDb, type TestDb } from "@/db/test-db";
 import type { CurrentUser } from "@/server/auth/types";
 import { runDailyJobs } from "@/server/jobs/daily";
 import { confirmInboxItem, createInboxItem, parseInboxItem } from "@/server/services/inbox.service";
+import { logCoachSession } from "@/server/services/log.service";
 import { declareIntent, declareReadiness, logPain } from "@/server/services/readiness.service";
 import { getCurrentRecommendation, recompute } from "@/server/services/recommendation.service";
 import { createStrengthWorkoutFromTemplate } from "@/server/services/strength-session.service";
@@ -29,6 +30,14 @@ const USER: CurrentUser = {
   displayName: "C",
   onboardingCompletedAt: null,
 };
+/** Second athlete: a coaching day with no session of their own. */
+const COACH: CurrentUser = {
+  id: "00000000-0000-4000-8000-0000000000c2",
+  email: "coach@example.test",
+  timezone: "Europe/Paris",
+  displayName: "Coach",
+  onboardingCompletedAt: null,
+};
 const NOW = new Date("2026-09-28T07:30:00.000Z"); // Monday 09:30 Paris
 const TODAY = "2026-09-28";
 
@@ -36,7 +45,10 @@ let handle: TestDb;
 
 beforeAll(async () => {
   handle = await createTestDb();
-  await handle.db.insert(schema.users).values({ id: USER.id, email: USER.email });
+  await handle.db.insert(schema.users).values([
+    { id: USER.id, email: USER.email },
+    { id: COACH.id, email: COACH.email },
+  ]);
   await seedCatalog(handle.db);
 });
 
@@ -200,6 +212,39 @@ describe("today pipeline", () => {
     expect(tomorrow?.primary.fixed).toBe(true);
   });
 
+  it("a coaching session feeds residual fatigue but is never the athlete's own session (spec §24)", async () => {
+    const at = new Date("2026-09-28T09:00:00.000Z");
+    const { id } = await logCoachSession(handle.db, COACH.id, {
+      date: TODAY,
+      startMinute: 7 * 60,
+      durationMin: 60,
+      demoLevel: "light",
+      standingMinutes: 60,
+      perceivedFatigue: 3,
+      timezone: COACH.timezone,
+    });
+    const rec = await recompute(handle.db, COACH.id, { now: at, timezone: COACH.timezone });
+    // No athlete RPE by design: no nag, no "charge estimée" advice.
+    expect(rec.output.askFor).not.toContain("rpe");
+    expect(rec.output.advice.map((a) => a.code)).not.toContain("MISSING_RPE");
+    // Not the day's primary session: START stays open, the primary is a real option.
+    expect(rec.output.primaryDone).toBe(false);
+    expect(rec.output.primary.title).not.toBe("Coaching CrossFit");
+    // Its small, exact load still counts in the recovery context.
+    expect(rec.output.trace.derived.residual.cardiovascular).toBeGreaterThan(0);
+    const [snapshot] = await handle.db
+      .select({ input: schema.recommendations.inputsSnapshot })
+      .from(schema.recommendations)
+      .where(eq(schema.recommendations.id, rec.id));
+    expect(snapshot?.input.history.find((s) => s.id === id)).toMatchObject({
+      type: "coach_session",
+      rpe: null,
+      estimated: false,
+    });
+    const view = await getTodayView(handle.db, COACH, at);
+    expect(view.recommendation?.primaryDone).toBe(false);
+  });
+
   it("active pain reaches the engine and the daily cron recomputes every user", async () => {
     const pain = await logPain(handle.db, USER.id, {
       location: "knee",
@@ -212,8 +257,8 @@ describe("today pipeline", () => {
     });
     expect(pain.medicalAdvice).toBe(false);
     const summary = await runDailyJobs(handle.db, new Date("2026-09-29T04:00:00.000Z"));
-    expect(summary.users).toBe(1);
-    expect(summary.recomputed).toBe(1);
+    expect(summary.users).toBe(2);
+    expect(summary.recomputed).toBe(2);
     const rec = await getCurrentRecommendation(handle.db, USER.id, "2026-09-29");
     expect(rec).not.toBeNull();
     expect(rec?.output.trace.derived).toBeTruthy();
