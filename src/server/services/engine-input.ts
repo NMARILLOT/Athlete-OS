@@ -208,6 +208,7 @@ export async function assembleEngineInput(
       type: w.type,
       kind: kindOf(w),
       family: familyOf(w),
+      title: w.title,
       rpe: w.rpe,
       funScore: null,
       sessionRpeLoad: w.sessionRpeLoad ?? sessionRpeLoad(durationMin, w.rpe),

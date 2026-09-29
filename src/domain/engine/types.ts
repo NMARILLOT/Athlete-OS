@@ -40,6 +40,8 @@ export interface HistorySession extends LoadProfile {
   type: WorkoutType;
   kind?: string | null;
   family?: string | null;
+  /** Display title of the session as the athlete named it (falls back to the catalog title). */
+  title?: string | null;
   rpe?: number | null;
   funScore?: number | null;
   sessionRpeLoad?: number | null;

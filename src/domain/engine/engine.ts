@@ -1,7 +1,7 @@
 import { LOAD_DIMENSION_VALUES, type StimulusKey, type Confidence } from "../core";
 import { addDays, daysBetween, isoWeekEnd, type IsoDate } from "../core/dates";
 import { WEEKLY_STRUCTURE } from "../athlete-model/defaults";
-import { buildCandidates, intentMatch } from "./candidates";
+import { buildCandidates, getCatalogEntry, intentMatch } from "./candidates";
 import { computeConfidence } from "./confidence";
 import { deriveContext } from "./derive";
 import { explain } from "./explain";
@@ -247,7 +247,8 @@ export function rescheduleSession(
       plannedId: planned.id,
       fromDate: ctx.today,
       toDate: d,
-      reason: `Déplacée au ${d} : jour libre compatible avec la récupération.`,
+      reason:
+        "Jour libre compatible avec la récupération (pas de séance lourde ni de cours la veille).",
     };
   }
   return {
@@ -301,7 +302,7 @@ export function runEngine(input: EngineInput, options: EngineOptions = {}): Reco
       ...done,
       kind: done.kind ?? done.type,
       family: done.family ?? done.type,
-      title: done.kind ?? done.type,
+      title: done.title ?? getCatalogEntry(done.kind ?? done.type)?.title ?? done.kind ?? done.type,
       equipment: [],
       recovery: false,
       origin: "done_today",

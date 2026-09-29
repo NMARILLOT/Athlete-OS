@@ -16,7 +16,7 @@ export function explain(
   const c = primary.candidate;
 
   if (opts.primaryDone)
-    return `Séance principale déjà faite aujourd'hui (${ctx.primaryDoneToday?.kind ?? "entraînement"}). Le reste est optionnel.`;
+    return `Séance principale déjà faite aujourd'hui (${primary.candidate.title}). Le reste est optionnel.`;
 
   if (c.fixed && c.family === "crossfit") {
     const covered = (Object.entries(c.expectedCredits) as Array<[StimulusKey, number]>)
