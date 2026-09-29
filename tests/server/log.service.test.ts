@@ -8,7 +8,6 @@ import { createTestDb, type TestDb } from "@/db/test-db";
 import {
   COACH_SESSION_ALGORITHM_VERSION,
   COACH_SESSION_LOAD,
-  coachRpeFromFatigue,
   coachSessionLoadVector,
   listActivePains,
   listRecentBodyCompositions,
@@ -57,10 +56,13 @@ describe("logCoachSession", () => {
       fixed: true,
       actualDurationMin: 90,
       plannedIntensity: "moderate",
-      rpe: 8,
-      sessionRpeLoad: 720,
+      // Perceived fatigue is the coach's context, not the athlete's RPE: no declared RPE, no AU.
+      rpe: null,
+      sessionRpeLoad: null,
     });
     expect(w?.startAt?.toISOString()).toBe("2026-09-28T16:00:00.000Z");
+    // Finished at the declared start + duration, not at the log time.
+    expect(w?.finishedAt?.toISOString()).toBe("2026-09-28T17:30:00.000Z");
     const [cs] = await handle.db
       .select()
       .from(schema.coachSessions)
@@ -90,7 +92,7 @@ describe("logCoachSession", () => {
     });
   });
 
-  it("maps demo level to a small, monotonic load and fatigue to a capped RPE", () => {
+  it("maps demo level to a small, monotonic load", () => {
     const none = coachSessionLoadVector("none", 30);
     const heavy = coachSessionLoadVector("heavy", 30);
     expect(none.cardiovascular).toBeLessThan(heavy.cardiovascular);
@@ -102,9 +104,6 @@ describe("logCoachSession", () => {
     // Standing bonus only applies to the legs, from two hours on the floor.
     expect(coachSessionLoadVector("light", 119).muscular_lower).toBe(1.5);
     expect(coachSessionLoadVector("light", 120).muscular_lower).toBe(2);
-    expect(coachRpeFromFatigue(1)).toBe(2);
-    expect(coachRpeFromFatigue(5)).toBe(10);
-    expect(coachRpeFromFatigue(9)).toBe(10);
   });
 
   it("stores a null start when no time is given", async () => {
@@ -119,8 +118,8 @@ describe("logCoachSession", () => {
     });
     const [w] = await handle.db.select().from(schema.workouts).where(eq(schema.workouts.id, id));
     expect(w?.startAt).toBeNull();
-    expect(w?.rpe).toBe(2);
-    expect(w?.sessionRpeLoad).toBe(120);
+    expect(w?.rpe).toBeNull();
+    expect(w?.sessionRpeLoad).toBeNull();
   });
 });
 

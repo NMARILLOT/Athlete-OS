@@ -3,7 +3,12 @@ import { getDb } from "@/db/client";
 import { getCurrentUser } from "@/server/auth";
 import { getTodayView } from "@/server/services/today.service";
 import { TodayScreen } from "@/components/today/today-screen";
-import { acceptOptionAction, declareIntentAction, startOptionAction } from "./actions";
+import {
+  acceptOptionAction,
+  applyReschedulesAction,
+  declareIntentAction,
+  startOptionAction,
+} from "./actions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Today" };
@@ -29,6 +34,10 @@ export default async function TodayPage() {
         startOption: async (option) => {
           "use server";
           return startOptionAction(option, view.recommendationId);
+        },
+        applyReschedule: async (plannedId) => {
+          "use server";
+          return applyReschedulesAction(plannedId);
         },
       }}
     />

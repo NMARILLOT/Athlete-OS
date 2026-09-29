@@ -5,16 +5,23 @@ import { useRouter } from "next/navigation";
 import { ChevronLeft, X } from "lucide-react";
 import type { ReactNode } from "react";
 
-/** Every non-tab route renders this: iOS standalone has no browser chrome (ARCHITECTURE §7). */
+/**
+ * Every non-tab route renders this: iOS standalone has no browser chrome (ARCHITECTURE §7).
+ * The chevron goes back in history when there is somewhere to go back to; on a cold start / deep
+ * link (one history entry) it falls back to `fallbackHref` instead of doing nothing.
+ */
 export function PageHeader({
   title,
   back = true,
   closeHref,
+  fallbackHref = "/today",
   action,
 }: {
   title: string;
   back?: boolean;
   closeHref?: string;
+  /** Where the chevron goes when the history stack is empty (default: Today). */
+  fallbackHref?: string;
   action?: ReactNode;
 }) {
   const router = useRouter();
@@ -32,7 +39,10 @@ export function PageHeader({
         <button
           type="button"
           aria-label="Retour"
-          onClick={() => router.back()}
+          onClick={() => {
+            if (window.history.length > 1) router.back();
+            else router.replace(fallbackHref);
+          }}
           className="flex size-11 items-center justify-center rounded-xl text-fg-muted hover:text-fg"
         >
           <ChevronLeft className="size-7" />

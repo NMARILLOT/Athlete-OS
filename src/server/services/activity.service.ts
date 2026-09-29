@@ -1,4 +1,5 @@
 import "server-only";
+import { ENGINE_PLANNED_STATUSES } from "./engine-input";
 import { and, asc, desc, eq, inArray, ne, sql, type SQL } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
 import type { Db } from "@/db/client";
@@ -26,6 +27,7 @@ import {
   classifyComparableGroup,
   efficiencyFactorForActivity,
   expectedLoadProfile,
+  paceAtHr,
   runningDynamicsSummary,
   selectZoneSet,
   timeInZones,
@@ -40,15 +42,29 @@ import {
   type RunningDynamicsSample,
   type TimeInZones,
 } from "@/domain/cardio";
-import type { Confidence, DataSource, IntensityBand, Modality, WorkoutStatus } from "@/domain/core";
+import type {
+  CardioKind,
+  Confidence,
+  DataSource,
+  IntensityBand,
+  Modality,
+  WorkoutStatus,
+} from "@/domain/core";
 import type { IsoDate, IsoDateTime } from "@/domain/core/dates";
 import type { LoadProfile } from "@/domain/engine";
-import { ACTUAL_SCALING_VERSION, impactUnits, scaleTemplateLoadToActual } from "@/domain/load";
+import {
+  ACTUAL_SCALING_VERSION,
+  classifyIntensity,
+  impactUnits,
+  scaleTemplateLoadToActual,
+  type IntensityDecision,
+} from "@/domain/load";
 import { AppError } from "@/server/errors";
 import { FIT_PARSER_VERSION, parseFit, type ParsedFit } from "@/server/fit/parser";
 import { FeatureDisabledError, flags } from "@/server/flags";
 import { log } from "@/server/logging";
 import {
+  garminMockAllowed,
   garminProvider,
   type GarminActivityDetails,
   type GarminProvider,
@@ -73,8 +89,31 @@ export const RUN_PR_ALGORITHM_VERSION = "run_pr_prorata_v1" as const;
 export const ACTIVITY_WORKOUT_ALGORITHM_VERSION = `${CARDIO_BUILDER_ALGORITHM_VERSION}+activity_v1`;
 /** Streams are downsampled to at most this many points for the charts. */
 export const MAX_CHART_POINTS = 600;
+/**
+ * Share of the measured duration that must be covered by HR samples inside the zone set before the
+ * zone distribution is trusted to classify the realised intensity (a strap that dropped out for
+ * half the session says nothing reliable).
+ */
+export const MIN_ZONE_COVERAGE = 0.5;
+/** Declared LTHR (typed by hand) → MEDIUM-confidence zones: nothing was measured (spec §16, §70). */
+export const MANUAL_LTHR_ZONE_CONFIDENCE: Confidence = "MEDIUM";
 
-export type ActivityProvider = "garmin" | "fit_import";
+/**
+ * `activities.provider` / `raw_payloads.provider`. `garmin_mock` marks rows produced by the
+ * development mock so simulated data is always recognisable (spec §14, §70) — never plain `garmin`.
+ */
+export type ActivityProvider = "garmin" | "garmin_mock" | "fit_import";
+
+/** Providers whose payload is authoritative on merge (Garmin fields win over a FIT file). */
+const GARMIN_LIKE_PROVIDERS: ReadonlyArray<ActivityProvider> = ["garmin", "garmin_mock"];
+const isGarminLike = (p: ActivityProvider): boolean => GARMIN_LIKE_PROVIDERS.includes(p);
+
+/** `personal_records` / `test_results` source: a mock never masquerades as a measured device. */
+function recordSourceFor(provider: ActivityProvider): DataSource {
+  if (provider === "garmin") return "GARMIN";
+  if (provider === "garmin_mock") return "MOCK";
+  return "DEVICE";
+}
 
 export interface ImportUser {
   id: string;
@@ -97,7 +136,10 @@ export interface ImportResult {
   duplicate: boolean;
   /** Another payload of the same activity existed: rows were merged on the fingerprint. */
   merged: boolean;
-  /** French sentences, e.g. "Nouveau record 5 km : 24:31". */
+  /**
+   * French sentences: "Nouveau record 5 km : 24:31" for a run of the exact distance, or
+   * "≈ Record estimé sur 5 km : 24:31 (au prorata de 5,7 km)" when the time was pro-rated (spec §70).
+   */
   prs: string[];
 }
 
@@ -345,8 +387,9 @@ interface ResolvedZoneSet {
 
 /**
  * `selectZoneSet` over the user's stored sets for the activity date; otherwise a set derived once
- * from the profile's manual LTHR (`zonesFromLthr`, source USER, persisted); null when nothing is
- * known (never 220 − age).
+ * from the profile's manual LTHR (`zonesFromLthr`, source USER, persisted with MEDIUM confidence:
+ * a value typed from memory is declared, not measured); null when nothing is known (never
+ * 220 − age).
  */
 async function resolveZoneSetForDate(
   db: Db,
@@ -396,7 +439,7 @@ async function resolveZoneSetForDate(
       restingHr: derived.restingHr ?? null,
       zones: derived.zones,
       source: derived.source,
-      confidence: derived.confidence,
+      confidence: MANUAL_LTHR_ZONE_CONFIDENCE,
     })
     .returning();
   if (!inserted) throw new Error("hr_zone_sets insert failed");
@@ -415,6 +458,9 @@ interface MetricDraft {
   inputs: MetricInputs;
 }
 
+/** `paceAtHr` needs this many seconds of moving samples inside the band (2 min, whatever the rate). */
+const PACE_AT_HR_MIN_SECONDS = 120;
+
 function metricDrafts(input: {
   modality: Modality;
   avgSpeedMps: number | null;
@@ -422,8 +468,39 @@ function metricDrafts(input: {
   avgHr: number | null;
   streams: StreamMap;
   intervalSec: number;
+  /** Zone set in force on the activity date; null when none is known (never 220 − age). */
+  zoneSet: HrZoneSet | null;
 }): MetricDraft[] {
   const drafts: MetricDraft[] = [];
+  // Pace @ HR (spec §17): steady-state pace over the samples inside the athlete's Z2 band — the
+  // athlete-specific version of "allure à 145–150 bpm". Running only, and only with a zone set.
+  if (input.modality === "running" && input.zoneSet && input.streams.hr && input.streams.speed) {
+    const z2 = input.zoneSet.zones.find((z) => z.zone === 2);
+    const hr = input.streams.hr;
+    const speed = input.streams.speed;
+    if (z2) {
+      const r = paceAtHr(
+        hr.map((h, i) => ({ hrBpm: h, speedMps: speed[i] ?? null })),
+        z2.minBpm,
+        z2.maxBpm,
+        { minSamples: Math.ceil(PACE_AT_HR_MIN_SECONDS / input.intervalSec) },
+      );
+      if (r)
+        drafts.push({
+          metric: "pace_at_hr",
+          value: r.paceSecKm,
+          unit: "s/km",
+          algorithmVersion: r.algorithmVersion,
+          inputs: {
+            zone: 2,
+            hrMin: z2.minBpm,
+            hrMax: z2.maxBpm,
+            avgHr: r.avgHr,
+            sampleCount: r.sampleCount,
+          },
+        });
+    }
+  }
   const ef = efficiencyFactorForActivity(input);
   if (ef) {
     drafts.push({
@@ -577,13 +654,14 @@ function mergeSet(provider: ActivityProvider) {
   const set: { [K in MergeKey]?: SQL } & { provider?: SQL; externalId?: SQL; updatedAt?: Date } = {
     updatedAt: new Date(),
   };
+  const garminLike = isGarminLike(provider);
   for (const key of MERGE_KEYS) {
     const column = activities[key];
-    set[key] =
-      provider === "garmin" ? excluded(column) : sql`coalesce(${column}, ${excluded(column)})`;
+    set[key] = garminLike ? excluded(column) : sql`coalesce(${column}, ${excluded(column)})`;
   }
-  if (provider === "garmin") {
-    set.provider = sql`'garmin'`;
+  if (garminLike) {
+    // The inserted row carries the exact provider string (`garmin` or `garmin_mock`).
+    set.provider = excluded(activities.provider);
     set.externalId = excluded(activities.externalId);
   }
   return set;
@@ -607,6 +685,25 @@ interface NormalisedActivity {
   avgHr: number | null;
   provider: ActivityProvider;
   zoneSet: ResolvedZoneSet | null;
+  /** Minutes per zone from the HR stream and `zoneSet`; null without either (never invented). */
+  timeInZones: TimeInZones | null;
+}
+
+/**
+ * Realised intensity measured from the zone distribution (domain `classifyIntensity`: ≥ 10 min in
+ * Z4–Z5 → hard, ≥ 20 min in Z3 → moderate, else the session kind's band / easy). Null when there is
+ * no zone set, no HR stream, or the samples inside the zones cover less than `MIN_ZONE_COVERAGE` of
+ * the measured duration — the caller then keeps the planned band or stores nothing.
+ */
+function measuredIntensity(
+  a: Pick<NormalisedActivity, "zoneSet" | "timeInZones" | "durationSec">,
+  cardioKind: CardioKind | null = null,
+): IntensityDecision | null {
+  const z = a.timeInZones;
+  if (!a.zoneSet || !z || !isPositive(a.durationSec)) return null;
+  const covered = z.z1 + z.z2 + z.z3 + z.z4 + z.z5;
+  if (covered < (a.durationSec / 60) * MIN_ZONE_COVERAGE) return null;
+  return classifyIntensity({ minutesInZones: z, cardioKind });
 }
 
 function measuredImpactUnits(a: Pick<NormalisedActivity, "modality" | "distanceM">): number | null {
@@ -633,12 +730,15 @@ function syntheticProfile(a: NormalisedActivity): LoadProfile {
 /**
  * Planned or in-progress cardio workout of the same athlete-local day whose modality matches
  * (`cardio_workouts.modality` when present, else the title); marked done from the measured
- * duration, the planned intensity kept (never guessed from HR), the ACTUAL analysis scaled from
- * the planned one (credits kept, source CALCULATED, confidence MEDIUM).
+ * duration. The realised intensity comes from the measured zone distribution when the activity has
+ * an HR stream and a zone set (`measuredIntensity`, source CALCULATED — a "Zone 2" plan run as a
+ * tempo is counted as hard by the engine); otherwise the planned band and its source are kept as
+ * they were, never relabelled CALCULATED. The ACTUAL analysis is scaled from the planned one
+ * (credits kept, source CALCULATED, confidence MEDIUM) and carries the same band.
  */
 async function linkPlannedWorkout(db: Db, userId: string, a: NormalisedActivity) {
   const candidates = await db
-    .select({ w: workouts, modality: cardioWorkouts.modality })
+    .select({ w: workouts, modality: cardioWorkouts.modality, kind: cardioWorkouts.workoutKind })
     .from(workouts)
     .leftJoin(
       cardioWorkouts,
@@ -649,7 +749,7 @@ async function linkPlannedWorkout(db: Db, userId: string, a: NormalisedActivity)
         eq(workouts.userId, userId),
         eq(workouts.date, a.localDate),
         eq(workouts.type, "cardio"),
-        inArray(workouts.status, ["planned", "in_progress"]),
+        inArray(workouts.status, [...ENGINE_PLANNED_STATUSES]),
       ),
     )
     .orderBy(asc(workouts.startAt), asc(workouts.createdAt));
@@ -659,6 +759,8 @@ async function linkPlannedWorkout(db: Db, userId: string, a: NormalisedActivity)
   if (!match) return null;
   const w = match.w;
   const actualMin = Math.max(1, Math.round(a.durationSec / 60));
+  const measured = measuredIntensity(a, match.kind ?? null);
+  const realisedIntensity: IntensityBand | null = measured?.band ?? w.plannedIntensity;
   await db
     .update(workouts)
     .set({
@@ -666,7 +768,8 @@ async function linkPlannedWorkout(db: Db, userId: string, a: NormalisedActivity)
       actualDurationMin: actualMin,
       finishedAt: a.finishedAt,
       startAt: w.startAt ?? a.startAt,
-      realisedIntensity: w.plannedIntensity,
+      realisedIntensity,
+      intensitySource: measured ? "CALCULATED" : w.intensitySource,
     })
     .where(and(eq(workouts.id, w.id), eq(workouts.userId, userId)));
 
@@ -684,7 +787,7 @@ async function linkPlannedWorkout(db: Db, userId: string, a: NormalisedActivity)
     const profile: LoadProfile = {
       expectedCredits: planned.stimulusCredits,
       loadVector: scaled.loadVector,
-      intensity: planned.intensity,
+      intensity: measured?.band ?? planned.intensity,
       heavyStrength: planned.heavyStrength,
       durationMin: actualMin,
       modality: a.modality,
@@ -699,8 +802,9 @@ async function linkPlannedWorkout(db: Db, userId: string, a: NormalisedActivity)
       planned.inputRef,
     );
   } else {
+    const synthetic = syntheticProfile(a);
     row = analysisRowFromProfile(
-      syntheticProfile(a),
+      { ...synthetic, intensity: measured?.band ?? synthetic.intensity },
       "CALCULATED",
       ACTIVITY_WORKOUT_ALGORITHM_VERSION,
       0.3,
@@ -717,22 +821,36 @@ async function linkPlannedWorkout(db: Db, userId: string, a: NormalisedActivity)
   return { id: w.id, title: w.title };
 }
 
-/** No planned session: a done cardio workout from the measured data, LOW-confidence analysis. */
+/**
+ * No planned session: a done cardio workout from the measured data, LOW-confidence analysis. The
+ * realised band is the measured one (zone distribution, else the average-HR zone); when no zone was
+ * actually resolved (no zone set, no HR) it stays null — never a default "easy" presented as
+ * calculated — and the RPE prompt fills the gap (spec §70).
+ */
 async function createDoneWorkout(db: Db, userId: string, a: NormalisedActivity) {
-  const profile = syntheticProfile(a);
+  const synthetic = syntheticProfile(a);
+  const measured = measuredIntensity(a);
+  const avgZone = a.zoneSet && isPositive(a.avgHr) ? zoneForHr(a.zoneSet.set, a.avgHr) : 0;
+  const realisedIntensity: IntensityBand | null =
+    measured?.band ?? (avgZone >= 1 ? synthetic.intensity : null);
+  const profile: LoadProfile = realisedIntensity
+    ? { ...synthetic, intensity: realisedIntensity }
+    : synthetic;
   const actualMin = Math.max(1, Math.round(a.durationSec / 60));
   const [w] = await db
     .insert(workouts)
     .values({
       userId,
       type: "cardio",
-      source: a.provider,
+      // `workout_source` is a Postgres enum: the mock stays `garmin` here, `activities.provider`
+      // (`garmin_mock`) is the marker.
+      source: a.provider === "garmin_mock" ? "garmin" : a.provider,
       status: "done",
       date: a.localDate,
       startAt: a.startAt,
       actualDurationMin: actualMin,
       title: a.title,
-      realisedIntensity: profile.intensity,
+      realisedIntensity,
       intensitySource: "CALCULATED",
       finishedAt: a.finishedAt,
       sessionRpeLoad: null,
@@ -768,6 +886,11 @@ const RUN_DISTANCES = [
 ] as const;
 /** A run longer than this share of the distance is not a fair attempt at it (skip). */
 const PR_MAX_DISTANCE_RATIO = 1.15;
+/** Up to this share over the distance the run counts as the distance itself (exact record). */
+const PR_EXACT_DISTANCE_RATIO = 1.01;
+
+/** "5,7" for 5700 m (French decimal comma). */
+const kmLabel = (meters: number): string => (meters / 1000).toFixed(1).replace(".", ",");
 
 async function detectRunPrs(
   db: Db,
@@ -776,11 +899,13 @@ async function detectRunPrs(
   workoutId: string | null,
 ): Promise<string[]> {
   if (a.modality !== "running" || !isPositive(a.distanceM) || !isPositive(a.durationSec)) return [];
-  const source: DataSource = a.provider === "garmin" ? "GARMIN" : "DEVICE";
+  const source = recordSourceFor(a.provider);
   const out: string[] = [];
   for (const d of RUN_DISTANCES) {
     if (a.distanceM < d.meters || a.distanceM > d.meters * PR_MAX_DISTANCE_RATIO) continue;
     const timeSec = Math.round((a.durationSec * d.meters) / a.distanceM);
+    // Beyond 1 % over the distance the time is pro-rated, i.e. an estimate the athlete never ran.
+    const estimated = a.distanceM > d.meters * PR_EXACT_DISTANCE_RATIO;
     const [current] = await db
       .select({ id: personalRecords.id, value: personalRecords.value })
       .from(personalRecords)
@@ -807,7 +932,7 @@ async function detectRunPrs(
         workoutId,
         activityId: a.id,
         source,
-        estimated: a.distanceM > d.meters * 1.01,
+        estimated,
         algorithmVersion: RUN_PR_ALGORITHM_VERSION,
         previousValue: current?.value ?? null,
       })
@@ -819,7 +944,11 @@ async function detectRunPrs(
         .update(personalRecords)
         .set({ superseded: true })
         .where(and(eq(personalRecords.id, current.id), eq(personalRecords.userId, userId)));
-    out.push(`Nouveau record ${d.label} : ${clock(timeSec)}`);
+    out.push(
+      estimated
+        ? `≈ Record estimé sur ${d.label} : ${clock(timeSec)} (au prorata de ${kmLabel(a.distanceM)} km)`
+        : `Nouveau record ${d.label} : ${clock(timeSec)}`,
+    );
   }
   return out;
 }
@@ -846,7 +975,7 @@ async function recordTest5k(
       conditions: { distanceM: a.distanceM, avgHr: a.avgHr },
       activityId: a.id,
       workoutId: workout.id,
-      source: a.provider === "garmin" ? "GARMIN" : "DEVICE",
+      source: recordSourceFor(a.provider),
       confidence: exact ? "HIGH" : "MEDIUM",
       algorithmVersion: exact ? null : RUN_PR_ALGORITHM_VERSION,
     })
@@ -973,7 +1102,7 @@ export async function importActivityDetails(
     const isNew = row.rawPayloadId === rawId;
     const merged = !isNew;
     // A FIT file merged onto an existing (Garmin) activity only fills gaps: derived data is kept.
-    const refresh = isNew || meta.provider === "garmin";
+    const refresh = isNew || isGarminLike(meta.provider);
 
     let zoneSet: ResolvedZoneSet | null = null;
     let prs: string[] = [];
@@ -1056,6 +1185,7 @@ export async function importActivityDetails(
           avgHr: row.avgHr,
           streams,
           intervalSec,
+          zoneSet: zoneSet?.set ?? null,
         }),
       );
 
@@ -1073,6 +1203,7 @@ export async function importActivityDetails(
         avgHr: row.avgHr,
         provider: meta.provider,
         zoneSet,
+        timeInZones: tiz,
       };
 
       // (g) workout link — only once per activity.
@@ -1145,6 +1276,10 @@ export async function syncGarminActivities(
   ctx: GarminSyncContext = defaultGarminContext(),
 ): Promise<GarminSyncResult> {
   if (!ctx.enabled) throw new FeatureDisabledError("garmin");
+  // Simulated activities never reach a production database (unless explicitly allowed).
+  if (ctx.provider.name === "mock" && !garminMockAllowed())
+    throw new FeatureDisabledError("garmin");
+  const provider: ActivityProvider = ctx.provider.name === "mock" ? "garmin_mock" : "garmin";
   const summaries = await ctx.provider.getActivities(user.id, range);
   let imported = 0;
   let duplicates = 0;
@@ -1153,7 +1288,7 @@ export async function syncGarminActivities(
     const details = await ctx.provider.getActivity(user.id, summary.externalId);
     if (!details) continue;
     const result = await importActivityDetails(db, user, details, {
-      provider: "garmin",
+      provider,
       dedupeKey: `garmin:activity:${details.externalId}`,
       parserVersion: GARMIN_IMPORT_VERSION,
       rawKind: "activity",
@@ -1259,6 +1394,7 @@ export interface ActivityDetailView {
 }
 
 const METRIC_LABEL_FR: Record<string, string> = {
+  pace_at_hr: "Allure à FC (zone 2)",
   efficiency_factor: "Efficience aérobie (EF)",
   aerobic_decoupling: "Découplage aérobie",
   rd_cadence: "Cadence (dynamique)",
@@ -1280,6 +1416,14 @@ function metricDetail(metric: string, inputs: MetricInputs): string | null {
   }
   if (metric === "efficiency_factor")
     return inputs.basis === "power" ? "puissance / FC moyenne" : "vitesse / FC moyenne";
+  if (metric === "pace_at_hr") {
+    const lo = inputs.hrMin;
+    const hi = inputs.hrMax;
+    const n = inputs.sampleCount;
+    if (typeof lo === "number" && typeof hi === "number")
+      return `allure moyenne des portions stables à ${lo}–${hi} bpm${typeof n === "number" ? ` · ${n} échantillons` : ""}`;
+    return null;
+  }
   if (metric.startsWith("rd_") && typeof inputs.sampleCount === "number")
     return `${inputs.sampleCount} échantillons`;
   return null;

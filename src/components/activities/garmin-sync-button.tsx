@@ -5,7 +5,10 @@ import { useState, useTransition } from "react";
 import { syncGarminAction, type GarminSyncActionResult } from "@/app/(app)/activities/actions";
 import { Button } from "@/components/ui/button";
 
-/** "Synchroniser Garmin (<provider>)": last 14 days through the shared import pipeline. */
+/**
+ * "Synchroniser Garmin (<provider>)": last 14 days through the shared import pipeline. The mock is
+ * named for what it is — simulated data, stored as provider `garmin_mock` (spec §14, §70).
+ */
 export function GarminSyncButton({ providerName }: { providerName: "mock" | "official" }) {
   const router = useRouter();
   const [result, setResult] = useState<GarminSyncActionResult | null>(null);
@@ -27,7 +30,11 @@ export function GarminSyncButton({ providerName }: { providerName: "mock" | "off
   return (
     <div className="flex flex-col gap-2">
       <Button variant="secondary" full disabled={pending} onClick={sync}>
-        {pending ? "Synchronisation…" : `Synchroniser Garmin (${providerName})`}
+        {pending
+          ? "Synchronisation…"
+          : providerName === "mock"
+            ? "Synchroniser Garmin (mock — données simulées)"
+            : "Synchroniser Garmin (officiel)"}
       </Button>
       {result ? (
         result.ok ? (

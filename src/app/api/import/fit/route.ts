@@ -2,7 +2,7 @@ import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
 import { getDb } from "@/db/client";
 import { requireUser } from "@/server/auth";
-import { UnauthorizedError } from "@/server/errors";
+import { httpError } from "@/server/http";
 import { errorFields, log } from "@/server/logging";
 import { importFitFile, InvalidFitError } from "@/server/services/activity.service";
 import { recompute } from "@/server/services/recommendation.service";
@@ -75,10 +75,11 @@ export async function POST(req: Request) {
       prs: result.prs,
     });
   } catch (err) {
-    if (err instanceof UnauthorizedError)
-      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     if (err instanceof InvalidFitError)
       return NextResponse.json({ error: err.message }, { status: 400 });
+    // 401 / 403 (allow-list) / 422 … answer with their own status instead of a logged 500.
+    const mapped = httpError(err);
+    if (mapped) return NextResponse.json(mapped.body, { status: mapped.status });
     log.error("import.fit.failed", { ...errorFields(err), durationMs: Date.now() - startedAt });
     return NextResponse.json({ error: "Import impossible pour le moment." }, { status: 500 });
   }

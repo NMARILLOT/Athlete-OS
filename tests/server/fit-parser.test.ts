@@ -12,7 +12,9 @@ const SESSION = N.SESSION as number;
 const ACTIVITY = N.ACTIVITY as number;
 import { parseFit } from "@/server/fit/parser";
 
-function buildRunFit(options: { withDynamics?: boolean; withHr?: boolean } = {}): Uint8Array {
+function buildRunFit(
+  options: { withDynamics?: boolean; withHr?: boolean; sport?: string } = {},
+): Uint8Array {
   const enc = new Encoder();
   const start = new Date("2026-09-29T07:15:00Z");
   enc.onMesg(
@@ -56,7 +58,7 @@ function buildRunFit(options: { withDynamics?: boolean; withHr?: boolean } = {})
   const session: Record<string, unknown> = {
     timestamp: end,
     startTime: start,
-    sport: "running",
+    sport: options.sport ?? "running",
     subSport: "generic",
     totalElapsedTime: 600,
     totalTimerTime: 600,
@@ -98,7 +100,9 @@ describe("FIT parser", () => {
     expect(a.durationSec).toBe(600);
     expect(a.distanceM).toBe(1860);
     expect(a.avgHr).toBe(141);
-    expect(a.avgCadence).toBe(172); // FIT running cadence is per foot
+    expect(a.avgCadence).toBe(172); // FIT running cadence is per foot → spm
+    expect(a.streams.cadence?.[3]).toBe(172); // the stream is in the same unit as the summary
+    expect(a.laps[0]?.avgCadence).toBe(172);
     expect(a.deviceSerial).toBe("3421009876");
     expect(a.laps).toHaveLength(1);
     expect(a.streams.sampleIntervalSec).toBe(5);
@@ -126,6 +130,13 @@ describe("FIT parser", () => {
     expect(a.streams.gctMs).toBeUndefined();
     expect(a.runningDynamics).toBeNull();
     expect(a.avgPowerW).toBeNull();
+  });
+
+  it("keeps cycling cadence as recorded (rpm is already the unit)", () => {
+    const a = parseFit(buildRunFit({ sport: "cycling" })).activity;
+    expect(a.avgCadence).toBe(86);
+    expect(a.streams.cadence?.[3]).toBe(86);
+    expect(a.laps[0]?.avgCadence).toBe(86);
   });
 
   it("rejects non-FIT bytes", () => {

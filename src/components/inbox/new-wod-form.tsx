@@ -3,6 +3,8 @@
 import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { createAndParseInboxAction } from "@/app/(app)/inbox/actions";
+import { ErrorNote } from "@/components/log/fields";
+import { isNextRedirect } from "@/lib/next-redirect";
 
 const QUICK = [
   "For time\n21-15-9\nThrusters 43/30\nPull-ups",
@@ -20,11 +22,25 @@ export function NewWodForm({
 }) {
   const [text, setText] = useState("");
   const [pending, start] = useTransition();
+  const [error, setError] = useState<string | null>(null);
   return (
     <form
-      action={(fd) => start(async () => createAndParseInboxAction(fd))}
+      action={(fd) =>
+        start(async () => {
+          setError(null);
+          try {
+            await createAndParseInboxAction(fd);
+          } catch (err) {
+            if (isNextRedirect(err)) throw err;
+            setError(
+              "Impossible d'enregistrer le WOD pour le moment. Ton texte est conservé : réessaie.",
+            );
+          }
+        })
+      }
       className="flex flex-col gap-3"
     >
+      <ErrorNote message={error} />
       <textarea
         name="text"
         required

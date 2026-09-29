@@ -5,8 +5,11 @@ import { z } from "zod";
  * Server environment (ARCHITECTURE.md §7, ADR-020/021). Parsed once, fails closed:
  *  - AUTH_MODE defaults to "supabase"; "local" is refused in production or on Vercel.
  *  - DATABASE_URL is mandatory in production (PGlite is dev/test only).
+ *  - ALLOWED_EMAILS must list at least one address in production (supabase mode): an empty
+ *    allow-list would admit every account of the Supabase project.
  */
 const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+const truthyFlag = (v: string | undefined) => v === "true" || v === "1" || v === "on";
 
 const EnvSchema = z
   .object({
@@ -37,6 +40,11 @@ const EnvSchema = z
     FLAG_BODY_COMP: z.string().optional(),
     FLAG_ADVANCED_READINESS: z.string().optional(),
     FLAG_EXPERIMENTAL_METRICS: z.string().optional(),
+    /** Development-only: allow GARMIN_PROVIDER=mock with FLAG_GARMIN in production (never by default). */
+    FLAG_GARMIN_MOCK_IN_PROD: z.string().optional(),
+    /** Per-user rolling 24 h caps on Layer B calls (ADR-022); defaults 30 / 50. */
+    AI_DAILY_CAP_PARSE_WOD: z.coerce.number().int().positive().optional(),
+    AI_DAILY_CAP_PARSE_INTENT: z.coerce.number().int().positive().optional(),
   })
   .superRefine((env, ctx) => {
     if (env.AUTH_MODE === "local" && isProduction) {
@@ -62,6 +70,31 @@ const EnvSchema = z
         code: "custom",
         path: ["DATABASE_URL"],
         message: "DATABASE_URL is mandatory in production.",
+      });
+    }
+    if (
+      isProduction &&
+      env.AUTH_MODE === "supabase" &&
+      parseEmailList(env.ALLOWED_EMAILS).length === 0
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["ALLOWED_EMAILS"],
+        message:
+          "ALLOWED_EMAILS must list at least one address in production (supabase auth mode).",
+      });
+    }
+    if (
+      isProduction &&
+      truthyFlag(env.FLAG_GARMIN) &&
+      env.GARMIN_PROVIDER === "mock" &&
+      !truthyFlag(env.FLAG_GARMIN_MOCK_IN_PROD)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["GARMIN_PROVIDER"],
+        message:
+          "FLAG_GARMIN with GARMIN_PROVIDER=mock is refused in production / on Vercel (set FLAG_GARMIN_MOCK_IN_PROD=true to allow simulated data).",
       });
     }
     if (env.AI_PROVIDER === "anthropic" && !env.ANTHROPIC_API_KEY) {
@@ -98,7 +131,12 @@ export function isProductionRuntime(): boolean {
 }
 
 export function allowedEmails(): string[] {
-  return (env().ALLOWED_EMAILS ?? "")
+  return parseEmailList(env().ALLOWED_EMAILS);
+}
+
+/** Comma-separated list → trimmed, lower-cased, non-empty entries (so "," is an empty list). */
+function parseEmailList(raw: string | undefined): string[] {
+  return (raw ?? "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);

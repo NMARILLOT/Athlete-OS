@@ -1,12 +1,13 @@
 import "server-only";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@/db/client";
-import { recommendations } from "@/db/schema";
+import { recommendations, workouts } from "@/db/schema";
 import { ENGINE_VERSION, projectWeek, runEngine, type Recommendation } from "@/domain/engine";
 import type { IsoDate } from "@/domain/core/dates";
 import { log } from "@/server/logging";
 import { localDate } from "@/server/time";
-import { assembleEngineInput } from "./engine-input";
+import { assembleEngineInput, ENGINE_PLANNED_STATUSES } from "./engine-input";
+import { moveWorkout } from "./workout.service";
 
 export interface StoredRecommendation {
   id: string;
@@ -117,6 +118,28 @@ export async function getCurrentRecommendation(
   };
 }
 
+/** One stored recommendation by id, user-scoped (null when it is not the user's). */
+export async function getRecommendation(
+  db: Db,
+  userId: string,
+  recommendationId: string,
+): Promise<StoredRecommendation | null> {
+  const [row] = await db
+    .select()
+    .from(recommendations)
+    .where(and(eq(recommendations.userId, userId), eq(recommendations.id, recommendationId)))
+    .limit(1);
+  if (!row) return null;
+  return {
+    id: row.id,
+    date: row.date,
+    version: row.version,
+    output: row.output,
+    acceptedOption: row.acceptedOption,
+    computedAt: row.computedAt,
+  };
+}
+
 /** Idempotent fallback when the cron has not produced today's row (never the normal path). */
 export async function ensureTodayRecommendation(
   db: Db,
@@ -140,4 +163,68 @@ export async function acceptOption(
     .update(recommendations)
     .set({ acceptedOption: option })
     .where(and(eq(recommendations.userId, userId), eq(recommendations.id, recommendationId)));
+}
+
+export interface PendingReschedule {
+  plannedId: string;
+  title: string;
+  fromDate: IsoDate;
+  /** Null = no compatible day this week (the engine suggests skipping / next week). */
+  toDate: IsoDate | null;
+  reason: string;
+}
+
+/**
+ * Engine reschedules (spec §32 "repositionner la force", §53 AUTO-ADJUSTED) still applicable: the
+ * planned session is the user's, not fixed, still open and still on `fromDate`. Today renders them
+ * as "Replanifié : <titre> → <date>" with an "Appliquer" action; the engine never moves a workout
+ * by itself (ADR-017) — a reschedule is emitted whenever the planned session is merely outscored.
+ */
+export async function pendingReschedules(
+  db: Db,
+  userId: string,
+  rec: Recommendation,
+): Promise<PendingReschedule[]> {
+  const ids = [...new Set(rec.reschedules.map((r) => r.plannedId))];
+  if (!ids.length) return [];
+  const rows = await db
+    .select({
+      id: workouts.id,
+      title: workouts.title,
+      date: workouts.date,
+      fixed: workouts.fixed,
+      status: workouts.status,
+    })
+    .from(workouts)
+    .where(and(eq(workouts.userId, userId), inArray(workouts.id, ids)));
+  const open: ReadonlySet<string> = new Set(ENGINE_PLANNED_STATUSES);
+  return rec.reschedules.flatMap((r) => {
+    const w = rows.find((x) => x.id === r.plannedId);
+    if (!w || w.fixed || !open.has(w.status) || w.date !== r.fromDate) return [];
+    return [
+      { plannedId: w.id, title: w.title, fromDate: r.fromDate, toDate: r.toDate, reason: r.reason },
+    ];
+  });
+}
+
+/**
+ * "Appliquer" on Today: move the suggested session(s) of today's current recommendation to the
+ * engine's target date (status → `auto_adjusted`). Only reschedules with a target date on or after
+ * today; the caller recomputes afterwards. `plannedIds` restricts the set (default: all).
+ */
+export async function applyReschedules(
+  db: Db,
+  userId: string,
+  opts: { timezone: string; today: IsoDate; plannedIds?: string[] },
+): Promise<{ applied: PendingReschedule[] }> {
+  const rec = await getCurrentRecommendation(db, userId, opts.today);
+  if (!rec) return { applied: [] };
+  const applied: PendingReschedule[] = [];
+  for (const r of await pendingReschedules(db, userId, rec.output)) {
+    if (!r.toDate || r.toDate < opts.today || r.toDate === r.fromDate) continue;
+    if (opts.plannedIds && !opts.plannedIds.includes(r.plannedId)) continue;
+    await moveWorkout(db, userId, r.plannedId, r.toDate, opts.timezone);
+    applied.push(r);
+  }
+  return { applied };
 }

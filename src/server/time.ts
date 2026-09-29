@@ -55,9 +55,25 @@ export function localIso(now: Date, timeZone: string): IsoDateTime {
   return `${shifted.toISOString().slice(0, 19)}${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
 }
 
-/** Instant for a local date + minute-of-day in a timezone. */
+/**
+ * Instant for a local date + minute-of-day in a timezone.
+ *
+ * The offset is sampled at UTC midnight, then re-evaluated at the candidate instant so that on a DST
+ * transition day the offset in force at the target local time is the one applied (18:00 on the
+ * spring-forward / fall-back day reads back as 18:00). A non-existent local time (inside the
+ * spring-forward gap) maps to a real instant within the hour around it; an ambiguous one
+ * (repeated during fall-back) maps to one of its two readings, deterministically.
+ */
 export function instantFor(date: IsoDate, minuteOfDay: number, timeZone: string): Date {
-  const guess = new Date(`${date}T00:00:00Z`);
-  const off = tzOffsetMinutes(guess, timeZone);
-  return new Date(guess.getTime() - off * 60000 + minuteOfDay * 60000);
+  const midnightUtc = new Date(`${date}T00:00:00Z`).getTime();
+  const offAtMidnight = tzOffsetMinutes(new Date(midnightUtc), timeZone);
+  const first = midnightUtc - offAtMidnight * 60000 + minuteOfDay * 60000;
+  const offAtFirst = tzOffsetMinutes(new Date(first), timeZone);
+  if (offAtFirst === offAtMidnight) return new Date(first);
+  // A transition lies between midnight and the target: re-apply with the offset in force there.
+  const second = first - (offAtFirst - offAtMidnight) * 60000;
+  const offAtSecond = tzOffsetMinutes(new Date(second), timeZone);
+  // If the corrected instant is not under that offset either, the local time does not exist
+  // (spring-forward gap): keep the first candidate.
+  return new Date(offAtSecond === offAtFirst ? second : first);
 }

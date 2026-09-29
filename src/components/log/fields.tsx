@@ -2,6 +2,7 @@
 
 import { useId, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
+import { isNextRedirect } from "@/lib/next-redirect";
 
 /**
  * Small form primitives shared by the "+" palette log pages: big touch targets (≥ 44 px),
@@ -320,9 +321,14 @@ export function ErrorNote({ message }: { message: string | null }) {
   );
 }
 
-/** Server actions throw a generic error on validation; keep the French message short. */
-export function errorMessage(err: unknown): string {
-  if (err instanceof Error && err.message && !/NEXT_REDIRECT/.test(err.message))
+/**
+ * Server actions throw a generic error on validation; keep the French message short. A server
+ * `redirect()` also rejects the action promise (the navigation still happens): that is a success,
+ * so no message is shown for it.
+ */
+export function errorMessage(err: unknown): string | null {
+  if (isNextRedirect(err)) return null;
+  if (err instanceof Error && err.message)
     return "Impossible d'enregistrer. Vérifie les valeurs et réessaie.";
   return "Impossible d'enregistrer. Réessaie.";
 }

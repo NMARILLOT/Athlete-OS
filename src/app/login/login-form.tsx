@@ -3,16 +3,18 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { safeNextPath } from "@/lib/safe-next-path";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 
 /**
  * Email + password, or a 6-digit email OTP typed in-app — no magic links (they open in Safari's
  * separate storage silo on an installed iOS PWA, ARCHITECTURE §7). Sign-ups are disabled server-side.
+ * `?next=` is only honoured as a same-origin path (open-redirect guard).
  */
 export function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const next = params.get("next") || "/today";
+  const next = safeNextPath(params.get("next"));
   const [mode, setMode] = useState<"password" | "otp" | "otp-verify">("password");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

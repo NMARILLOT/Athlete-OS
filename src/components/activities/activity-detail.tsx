@@ -9,7 +9,12 @@ import type {
   ActivityMetricView,
   ActivityRunningDynamicsView,
 } from "@/server/services/activity.service";
-import { MODALITY_EMOJI, PROVIDER_FR, describeComparableGroup } from "./labels";
+import {
+  MODALITY_EMOJI,
+  PROVIDER_FR,
+  describeComparableGroup,
+  isSimulatedProvider,
+} from "./labels";
 
 type ActivityHead = ActivityDetailView["activity"];
 
@@ -61,7 +66,9 @@ export function ActivityHeader({ a }: { a: ActivityHead }) {
           {formatDateShort(a.localDate)} · {localClock(a.startAt, a.utcOffsetMin)}
         </p>
         <div className="mt-2 flex flex-wrap gap-1.5">
-          <Chip tone="neutral">{PROVIDER_FR[a.provider] ?? a.provider}</Chip>
+          <Chip tone={isSimulatedProvider(a.provider) ? "warn" : "neutral"}>
+            {PROVIDER_FR[a.provider] ?? a.provider}
+          </Chip>
           {a.comparableGroup ? (
             <Chip tone="info">{describeComparableGroup(a.comparableGroup)}</Chip>
           ) : null}
@@ -105,8 +112,11 @@ export function ActivitySummary({ a }: { a: ActivityHead }) {
         />
       </div>
       <p className="mt-2 text-[11px] text-fg-subtle">
-        Valeurs mesurées par l&apos;appareil
-        {a.deviceSerial ? ` (n° ${a.deviceSerial})` : ""} · lecteur {a.parserVersion}
+        {isSimulatedProvider(a.provider)
+          ? "Valeurs simulées par le mock Garmin (développement) — rien n'a été mesuré"
+          : `Valeurs mesurées par l'appareil${a.deviceSerial ? ` (n° ${a.deviceSerial})` : ""}`}
+        {" · lecteur "}
+        {a.parserVersion}
         {a.calories != null ? ` · ${a.calories} kcal` : ""}
       </p>
     </Card>
@@ -187,8 +197,14 @@ export function MetricsList({ metrics }: { metrics: ActivityMetricView[] }) {
               </div>
               <p className="shrink-0 text-lg font-semibold tabular-nums">
                 {m.estimated ? "≈ " : ""}
-                {Number.isInteger(m.value) ? m.value : m.value.toFixed(2)}
-                <span className="ml-1 text-xs text-fg-muted">{m.unit}</span>
+                {m.unit === "s/km"
+                  ? formatPace(m.value).replace(" /km", "")
+                  : Number.isInteger(m.value)
+                    ? m.value
+                    : m.value.toFixed(2)}
+                <span className="ml-1 text-xs text-fg-muted">
+                  {m.unit === "s/km" ? "/km" : m.unit}
+                </span>
               </p>
             </li>
           ))}

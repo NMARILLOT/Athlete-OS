@@ -6,6 +6,18 @@ import type { GarminActivityDetails } from "@/server/providers/garmin/types";
 export const FIT_PARSER_VERSION = "fit_parser_v1" as const;
 
 /**
+ * Sports whose FIT cadence is recorded per foot ("rpm"): the summary, the laps AND the record
+ * stream are all doubled to steps per minute so one activity never shows two units (spec §15/§17).
+ */
+const PER_FOOT_CADENCE_SPORTS: ReadonlySet<string> = new Set([
+  "running",
+  "trail_running",
+  "track_running",
+  "walking",
+  "hiking",
+]);
+
+/**
  * FitParser (spec §73): tolerant extraction from a FIT file using the official Garmin FIT SDK.
  * Every field is optional; absent fields stay null — a metric is never invented (spec §15).
  * Output is the same normalised shape as the Garmin provider so the import pipeline is shared.
@@ -74,6 +86,7 @@ export function parseFit(bytes: Uint8Array | ArrayBuffer | Buffer): ParsedFit {
   const sport = str(session.sport) ?? "generic";
   const subSport = str(session.subSport);
   const avgSpeed = num(session.enhancedAvgSpeed) ?? num(session.avgSpeed);
+  const cadenceFactor = PER_FOOT_CADENCE_SPORTS.has(sport.toLowerCase()) ? 2 : 1;
 
   // Streams: resample records to a fixed interval (median dt, min 1 s) with nulls for gaps.
   const t0 = Date.parse(startTime);
@@ -123,7 +136,7 @@ export function parseFit(bytes: Uint8Array | ArrayBuffer | Buffer): ParsedFit {
     }
     const c = num(r.cadence);
     if (c !== null) {
-      cadence[i] = c;
+      cadence[i] = c * cadenceFactor;
       hasCad = true;
     }
     const p = num(r.power);
@@ -171,9 +184,7 @@ export function parseFit(bytes: Uint8Array | ArrayBuffer | Buffer): ParsedFit {
     avgSpeedMps: avgSpeed,
     avgPowerW: num(session.avgPower),
     avgCadence:
-      num(session.avgCadence) !== null
-        ? (num(session.avgCadence) as number) * (sport === "running" ? 2 : 1)
-        : null, // running cadence in FIT is per-foot
+      num(session.avgCadence) !== null ? (num(session.avgCadence) as number) * cadenceFactor : null,
     elevationGainM: num(session.totalAscent),
     calories: num(session.totalCalories),
     deviceName: str(device.productName) ?? str(device.garminProduct) ?? str(device.product),
@@ -191,7 +202,7 @@ export function parseFit(bytes: Uint8Array | ArrayBuffer | Buffer): ParsedFit {
       maxHr: num(l.maxHeartRate),
       avgSpeedMps: num(l.enhancedAvgSpeed) ?? num(l.avgSpeed),
       avgPowerW: num(l.avgPower),
-      avgCadence: num(l.avgCadence),
+      avgCadence: num(l.avgCadence) !== null ? (num(l.avgCadence) as number) * cadenceFactor : null,
       elevationGainM: num(l.totalAscent),
     })),
     streams: {

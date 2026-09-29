@@ -1,5 +1,7 @@
 "use client";
 
+import { isNextRedirect } from "@/lib/next-redirect";
+
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { CalendarClock } from "lucide-react";
@@ -62,12 +64,17 @@ export function MoveButton({
     if (!target) return;
     setError(null);
     startMove(async () => {
-      const res = await moveWorkoutAction(workoutId, target, force);
-      if (res.ok) {
-        close();
-        router.refresh();
-      } else {
-        setError(res.message);
+      try {
+        const res = await moveWorkoutAction(workoutId, target, force);
+        if (res.ok) {
+          close();
+          router.refresh();
+        } else {
+          setError(res.message);
+        }
+      } catch (err) {
+        if (isNextRedirect(err)) throw err;
+        setError("Déplacement impossible pour le moment. Vérifie ta connexion et réessaie.");
       }
     });
   }

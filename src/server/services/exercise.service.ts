@@ -10,8 +10,17 @@ import type { ExercisePageView, StrengthSetView } from "./view-models";
 /**
  * Exercise page (spec §28): current e1RM, PRs, last exposure, weekly sets, recent loads and the
  * set history of one movement. Every e1RM is an Epley estimate (the UI shows "≈"); PR values are
- * whatever `personal_records` stored, with their own `estimated` flag (spec §58, §70).
+ * whatever `personal_records` stored, with their own `estimated` flag (spec §58, §70) — carried to
+ * the page so an e1RM-based record is never rendered as a measured lift.
  */
+
+/** `estimated` flag of the records behind `recentPrKg` / `bestPrKg` (false when there is none). */
+export interface ExercisePrFlags {
+  recentPrEstimated: boolean;
+  bestPrEstimated: boolean;
+}
+
+export type ExercisePageData = ExercisePageView & ExercisePrFlags;
 
 /** Window for "current" e1RM: the best working-set estimate of the last 28 days. */
 const CURRENT_E1RM_DAYS = 28;
@@ -43,7 +52,7 @@ export async function getExercisePage(
   userId: string,
   exerciseId: string,
   today: IsoDate = new Date().toISOString().slice(0, 10),
-): Promise<ExercisePageView> {
+): Promise<ExercisePageData> {
   const def = getExercise(exerciseId);
   if (!def) throw new NotFoundError("Exercice");
 
@@ -110,13 +119,15 @@ export async function getExercisePage(
     sets: setsByWorkout.get(r.workoutId) ?? [],
   }));
 
-  // PRs: latest current record for "recent", the all-time maximum (superseded included) for "best".
+  // PRs: latest current record for "recent", the all-time maximum (superseded included) for "best";
+  // each keeps its own `estimated` flag (e1RM records are estimates, declared lifts are not).
   const prRows = await db
     .select({
       value: personalRecords.value,
       unit: personalRecords.unit,
       superseded: personalRecords.superseded,
       achievedAt: personalRecords.achievedAt,
+      estimated: personalRecords.estimated,
     })
     .from(personalRecords)
     .where(
@@ -128,9 +139,10 @@ export async function getExercisePage(
       ),
     )
     .orderBy(desc(personalRecords.achievedAt));
-  const recentPrKg = prRows.find((r) => !r.superseded)?.value ?? null;
-  const bestPrKg = prRows.reduce<number | null>(
-    (best, r) => (best === null || r.value > best ? r.value : best),
+  type PrRow = (typeof prRows)[number];
+  const recentPr = prRows.find((r) => !r.superseded) ?? null;
+  const bestPr = prRows.reduce<PrRow | null>(
+    (best, r) => (best === null || r.value > best.value ? r : best),
     null,
   );
 
@@ -138,8 +150,10 @@ export async function getExercisePage(
     exerciseId,
     name: def.name,
     currentE1rmKg,
-    recentPrKg,
-    bestPrKg,
+    recentPrKg: recentPr?.value ?? null,
+    recentPrEstimated: recentPr?.estimated ?? false,
+    bestPrKg: bestPr?.value ?? null,
+    bestPrEstimated: bestPr?.estimated ?? false,
     lastExposure,
     weeklySets,
     recentLoads,

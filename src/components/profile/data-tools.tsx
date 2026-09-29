@@ -6,6 +6,7 @@ import { deleteAccountAction, exportDataAction } from "@/app/(app)/profile/actio
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 import { errorMessage, FormError } from "@/components/profile/controls";
+import { clearClientCaches } from "@/components/pwa/client-cache";
 
 const CONFIRM_WORD = "SUPPRIMER";
 
@@ -48,6 +49,7 @@ export function DataTools({ authMode }: { authMode: "local" | "supabase" }) {
     setDeleteError(null);
     startDelete(async () => {
       try {
+        await clearClientCaches();
         await deleteAccountAction(word);
         router.replace("/login");
       } catch (e) {

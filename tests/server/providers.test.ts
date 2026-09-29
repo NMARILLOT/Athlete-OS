@@ -109,6 +109,60 @@ describe("Garmin mock provider", () => {
   });
 });
 
+describe("Garmin provider factory", () => {
+  const PROD_ENV = {
+    NODE_ENV: "production",
+    DATABASE_URL: "postgres://example.invalid/athlete",
+    NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon",
+    ALLOWED_EMAILS: "a@example.test",
+    GARMIN_PROVIDER: "mock",
+  } as const;
+
+  async function loadGarmin() {
+    vi.resetModules();
+    return import("@/server/providers/garmin");
+  }
+
+  it("refuses the mock in production unless FLAG_GARMIN_MOCK_IN_PROD is explicitly true", async () => {
+    try {
+      for (const [k, v] of Object.entries(PROD_ENV)) vi.stubEnv(k, v);
+      vi.stubEnv("FLAG_GARMIN_MOCK_IN_PROD", "");
+      const refused = await loadGarmin();
+      expect(refused.garminMockAllowed()).toBe(false);
+      // Fails closed: the official stub, which answers "not configured" instead of inventing data.
+      expect(refused.garminProvider().name).toBe("official");
+      await expect(
+        refused
+          .garminProvider()
+          .getActivities("u", { from: "2026-09-21T00:00:00Z", to: "2026-09-27T23:59:59Z" }),
+      ).rejects.toThrow();
+
+      vi.stubEnv("FLAG_GARMIN_MOCK_IN_PROD", "true");
+      const allowed = await loadGarmin();
+      expect(allowed.garminMockAllowed()).toBe(true);
+      expect(allowed.garminProvider().name).toBe("mock");
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
+
+  it("serves the mock outside production", async () => {
+    try {
+      vi.stubEnv("NODE_ENV", "test");
+      vi.stubEnv("VERCEL", "");
+      vi.stubEnv("GARMIN_PROVIDER", "mock");
+      const dev = await loadGarmin();
+      expect(dev.garminMockAllowed()).toBe(true);
+      expect(dev.garminProvider().name).toBe("mock");
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
+});
+
 describe("secret comparison", () => {
   it("fails closed and compares in constant time", () => {
     expect(secretMatches("abc", undefined)).toBe(false);

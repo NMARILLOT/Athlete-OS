@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { ExercisePrFlags } from "@/server/services/exercise.service";
 import type { ExercisePageView, StrengthSetView } from "@/server/services/view-models";
 import { Card, CardTitle } from "@/components/ui/card";
 import { Empty } from "@/components/ui/empty";
@@ -8,15 +9,15 @@ import { LineChart } from "./charts";
 
 /**
  * Exercise page blocks (spec §28). e1RM values are estimates (Epley) and are rendered with "≈";
- * PR values keep what `personal_records` stored (measured lifts vs estimated e1RM are told apart
- * by the record itself, not by this page).
+ * PR values keep what `personal_records` stored, and a record whose `estimated` flag is set (an
+ * e1RM-based PR) is rendered with "≈" too — never as a measured lift (spec §70).
  */
 
 function kg(v: number | null): string | null {
   return v == null ? null : Number.isInteger(v) ? String(v) : v.toFixed(1);
 }
 
-export function ExerciseStats({ view }: { view: ExercisePageView }) {
+export function ExerciseStats({ view }: { view: ExercisePageView & Partial<ExercisePrFlags> }) {
   return (
     <div className="grid grid-cols-2 gap-2">
       <Stat
@@ -26,8 +27,20 @@ export function ExerciseStats({ view }: { view: ExercisePageView }) {
         estimated
         hint="28 derniers jours"
       />
-      <Stat label="PR récent" value={kg(view.recentPrKg)} unit="kg" />
-      <Stat label="Meilleur PR" value={kg(view.bestPrKg)} unit="kg" />
+      <Stat
+        label="PR récent"
+        value={kg(view.recentPrKg)}
+        unit="kg"
+        estimated={view.recentPrEstimated === true}
+        hint={view.recentPrEstimated ? "e1RM estimé" : undefined}
+      />
+      <Stat
+        label="Meilleur PR"
+        value={kg(view.bestPrKg)}
+        unit="kg"
+        estimated={view.bestPrEstimated === true}
+        hint={view.bestPrEstimated ? "e1RM estimé" : undefined}
+      />
       <Stat
         label="Dernière expo"
         value={view.lastExposure ? formatDateShort(view.lastExposure) : null}

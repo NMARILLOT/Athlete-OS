@@ -172,7 +172,9 @@ describe("getExercisePage", () => {
     expect(view.lastExposure).toBe(TODAY);
     expect(view.weeklySets).toBe(4); // Monday 2 + today 2 working sets; warm-ups excluded
     expect(view.recentPrKg).toBe(132);
+    expect(view.recentPrEstimated).toBe(true); // e1RM-based record → rendered "≈" (spec §70)
     expect(view.bestPrKg).toBe(140);
+    expect(view.bestPrEstimated).toBe(false); // declared 1RM
   });
 
   it("returns the last 20 working sets oldest-first with their e1RM", async () => {
@@ -218,7 +220,9 @@ describe("getExercisePage", () => {
       name: "Front squat",
       currentE1rmKg: null,
       recentPrKg: null,
+      recentPrEstimated: false,
       bestPrKg: null,
+      bestPrEstimated: false,
       lastExposure: null,
       weeklySets: 0,
       recentLoads: [],

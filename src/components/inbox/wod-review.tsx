@@ -13,6 +13,8 @@ import { Stat } from "@/components/ui/stat";
 import { DIMENSION_LABEL_FR, STIMULUS_LABEL_FR } from "@/domain/engine";
 import type { LoadDimension, StimulusKey } from "@/domain/core";
 import type { InboxItemView } from "@/server/services/view-models";
+import { ErrorNote } from "@/components/log/fields";
+import { isNextRedirect } from "@/lib/next-redirect";
 
 const FORMAT_FR: Record<string, string> = {
   for_time: "For time",
@@ -41,6 +43,18 @@ export function WodReview({ item, today }: { item: InboxItemView; today: string 
   const [date, setDate] = useState(item.scheduledFor ?? today);
   const [start, setStart] = useState(item.startLocal ? item.startLocal.slice(0, 5) : "18:30");
   const [pending, run] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  /** Runs a server action in the transition; Next redirects are not failures (spec: never a dead end). */
+  const guarded = (fn: () => Promise<void>) =>
+    run(async () => {
+      setError(null);
+      try {
+        await fn();
+      } catch (err) {
+        if (isNextRedirect(err)) throw err;
+        setError("Impossible d'enregistrer pour le moment. Vérifie ta connexion et réessaie.");
+      }
+    });
   const wod = item.normalizedWod;
   const a = item.analysis;
 
@@ -83,7 +97,7 @@ export function WodReview({ item, today }: { item: InboxItemView; today: string 
           <div className="mt-3 flex gap-2">
             <Button
               onClick={() =>
-                run(async () => {
+                guarded(async () => {
                   await reparseInboxAction(item.id, text);
                   setEditing(false);
                 })
@@ -214,12 +228,13 @@ export function WodReview({ item, today }: { item: InboxItemView; today: string 
               />
             </label>
           </div>
+          <ErrorNote message={error} />
           <div className="mt-3 flex gap-2">
             <Button
               size="lg"
               className="flex-1"
               disabled={pending || !wod}
-              onClick={() => run(async () => confirmInboxAction(item.id, date, start || null))}
+              onClick={() => guarded(() => confirmInboxAction(item.id, date, start || null))}
             >
               {pending ? "…" : "C'est ça, je le fais"}
             </Button>
@@ -227,7 +242,7 @@ export function WodReview({ item, today }: { item: InboxItemView; today: string 
               size="lg"
               variant="ghost"
               disabled={pending}
-              onClick={() => run(async () => discardInboxAction(item.id))}
+              onClick={() => guarded(() => discardInboxAction(item.id))}
             >
               Ignorer
             </Button>

@@ -1,12 +1,11 @@
 import "server-only";
-import { and, desc, eq, gte, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { dailyReadiness, userIntents, users, athleteProfiles, workouts } from "@/db/schema";
-import { addDays } from "@/domain/core/dates";
 import type { CurrentUser } from "@/server/auth/types";
 import { localDate, localMinute } from "@/server/time";
 import { familyOf, kindOf } from "./engine-input";
-import { ensureTodayRecommendation } from "./recommendation.service";
+import { ensureTodayRecommendation, pendingReschedules } from "./recommendation.service";
 import type { TodayView, WorkoutCard } from "./view-models";
 
 export function toWorkoutCard(w: typeof workouts.$inferSelect, timezone: string): WorkoutCard {
@@ -58,6 +57,9 @@ export async function getTodayView(
     )
     .orderBy(desc(userIntents.declaredAt))
     .limit(1);
+  // Any in-progress session, whatever its date: a session started days ago and never closed
+  // (phone died) must keep its "Reprendre" entry point until it is finished (it stays in_progress
+  // forever otherwise and never enters the engine history).
   const [inProgress] = await db
     .select({ id: workouts.id, type: workouts.type })
     .from(workouts)
@@ -66,7 +68,6 @@ export async function getTodayView(
         eq(workouts.userId, user.id),
         eq(workouts.status, "in_progress"),
         inArray(workouts.type, ["strength", "cardio"]),
-        gte(workouts.date, addDays(today, -1)),
       ),
     )
     .orderBy(desc(workouts.startAt))
@@ -104,6 +105,7 @@ export async function getTodayView(
           }
         : null,
     activeIntentKind: intent?.kind ?? null,
+    reschedules: await pendingReschedules(db, user.id, rec.output),
     inProgressWorkoutId: inProgress?.id ?? null,
     inProgressWorkoutType:
       inProgress?.type === "cardio" ? "cardio" : inProgress ? "strength" : null,

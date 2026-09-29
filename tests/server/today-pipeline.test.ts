@@ -8,8 +8,13 @@ import { runDailyJobs } from "@/server/jobs/daily";
 import { confirmInboxItem, createInboxItem, parseInboxItem } from "@/server/services/inbox.service";
 import { declareIntent, declareReadiness, logPain } from "@/server/services/readiness.service";
 import { getCurrentRecommendation, recompute } from "@/server/services/recommendation.service";
+import { createStrengthWorkoutFromTemplate } from "@/server/services/strength-session.service";
 import { getTodayView } from "@/server/services/today.service";
-import { completeWorkout, createWorkoutFromOption } from "@/server/services/workout.service";
+import {
+  completeWorkout,
+  createWorkoutFromOption,
+  findOpenWorkoutForOption,
+} from "@/server/services/workout.service";
 
 vi.mock("server-only", () => ({}));
 
@@ -125,6 +130,43 @@ describe("today pipeline", () => {
     const view = await getTodayView(handle.db, USER, new Date("2026-09-28T10:00:00.000Z"));
     expect(view.workouts.map((w) => w.status)).toContain("done");
     expect(view.workouts.find((w) => w.id === created.id)?.rpe).toBe(4);
+  });
+
+  it("START on a planned free session reuses it instead of inserting a duplicate", async () => {
+    const { workoutId } = await createStrengthWorkoutFromTemplate(handle.db, USER.id, {
+      templateId: "full_a",
+      date: TODAY,
+    });
+    const rec = await recompute(handle.db, USER.id, {
+      now: new Date("2026-09-28T10:30:00.000Z"),
+      timezone: USER.timezone,
+    });
+    const [snapshot] = await handle.db
+      .select({ input: schema.recommendations.inputsSnapshot })
+      .from(schema.recommendations)
+      .where(eq(schema.recommendations.id, rec.id));
+    expect(snapshot?.input.planned.map((p) => p.id)).toContain(workoutId);
+    const before = await handle.db
+      .select({ id: schema.workouts.id })
+      .from(schema.workouts)
+      .where(and(eq(schema.workouts.userId, USER.id), eq(schema.workouts.date, TODAY)));
+    // The action resolves the option to the open session (by plannedId, else by kind) and routes to it.
+    const byId = await findOpenWorkoutForOption(handle.db, USER.id, {
+      date: TODAY,
+      kind: "strength_full",
+      plannedId: workoutId,
+    });
+    const byKind = await findOpenWorkoutForOption(handle.db, USER.id, {
+      date: TODAY,
+      kind: "strength_full",
+    });
+    expect(byId?.id).toBe(workoutId);
+    expect(byKind?.id).toBe(workoutId);
+    const after = await handle.db
+      .select({ id: schema.workouts.id })
+      .from(schema.workouts)
+      .where(and(eq(schema.workouts.userId, USER.id), eq(schema.workouts.date, TODAY)));
+    expect(after).toHaveLength(before.length);
   });
 
   it("confirms a pasted WOD into a fixed class that the engine plans around", async () => {

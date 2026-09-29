@@ -22,6 +22,8 @@ export const DATA_SOURCE_VALUES = [
   "HEURISTIC",
   "CALCULATED",
   "ENGINE",
+  /** Development fixtures (mock Garmin provider): never a measurement. */
+  "MOCK",
 ] as const;
 export type DataSource = (typeof DATA_SOURCE_VALUES)[number];
 

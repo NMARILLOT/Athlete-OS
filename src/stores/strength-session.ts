@@ -9,10 +9,13 @@ import {
   decideProgression,
   estimateOneRepMax,
   restSecondsFor,
+  type ProgressionDecision,
   type SetQuality,
   type StrengthPrescription,
 } from "@/domain/strength";
 import { newId } from "@/lib/ids";
+
+export const STRENGTH_SESSION_STORAGE_KEY = "athleteos.strength-session.v1";
 
 /**
  * Active strength session store (ARCHITECTURE §4 "Strength session (offline-first)").
@@ -73,12 +76,32 @@ export interface OutboxEvent {
   at: string;
 }
 
+/** A set of this workout already on the server replica (resume when IndexedDB is empty). */
+export interface BundleSet {
+  id: string;
+  workoutExerciseId: string;
+  setIndex: number;
+  reps: number;
+  weightKg: number;
+  quality: SetQuality | null;
+  rpe: number | null;
+  isWarmup: boolean;
+  completedAt: string;
+  clientUpdatedAt: string;
+}
+
 export interface StrengthBundle {
   workoutId: string;
   title: string;
   date: string;
   templateId: string | null;
+  /** Server status of the workout: the shell never re-seeds a `done`/`skipped` one. */
+  status: "planned" | "in_progress" | "done" | "skipped" | "auto_adjusted";
+  /** Server-side start (`workouts.start_at`) when the session is already in progress. */
+  startedAt: string | null;
   exercises: SessionExercise[];
+  /** Sets already synced for this workout (only meaningful when `status === "in_progress"`). */
+  sets: BundleSet[];
   restPolicyOverrides?: Partial<Record<StrengthPrescription["intent"], number>>;
 }
 
@@ -112,7 +135,14 @@ interface StrengthState {
   flushing: boolean;
   lastFlushError: string | null;
   // lifecycle
+  /** Fresh session from a planned bundle: seeds working weights and emits `session_started`. */
   startSession: (bundle: StrengthBundle) => void;
+  /**
+   * Resume a session the server already knows as `in_progress` when IndexedDB is empty
+   * (ARCHITECTURE §4.2: replica only when the local store is gone): seeds the logged sets from the
+   * bundle and emits nothing — the server is already in the right state.
+   */
+  resumeSession: (bundle: StrengthBundle) => void;
   resumeOrNull: () => Session | null;
   clearSession: () => void;
   // in-session
@@ -159,15 +189,32 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** Deterministic next-weight suggestion from history + prescription (client-side autoload, spec §79). */
-export function suggestWeight(ex: SessionExercise): number | null {
-  const decision = decideProgression({
+/** The batch currently being posted, so concurrent flush calls chain instead of racing. */
+let inflight: Promise<void> | null = null;
+
+/** Full deterministic autoload decision (rule id + spec-worded rationale, spec §79). */
+export function suggestDecision(ex: SessionExercise): ProgressionDecision {
+  return decideProgression({
     prescription: ex.prescription,
     incrementKg: ex.incrementKg,
     history: ex.lastExposure ? [{ date: ex.lastExposure.date, sets: ex.lastExposure.sets }] : [],
     knownE1rmKg: ex.bestE1rmKg,
   });
-  return decision.nextWeightKg ?? ex.prescription.loadSuggestionKg ?? null;
+}
+
+/** Deterministic next-weight suggestion from history + prescription (client-side autoload, spec §79). */
+export function suggestWeight(ex: SessionExercise): number | null {
+  return suggestDecision(ex).nextWeightKg ?? ex.prescription.loadSuggestionKg ?? null;
+}
+
+/** ARCHITECTURE §7: ask for durable storage so the offline session/outbox cannot be evicted. */
+export function requestPersistentStorage(): void {
+  try {
+    if (typeof navigator === "undefined") return;
+    void navigator.storage?.persist?.().catch(() => undefined);
+  } catch {
+    /* not supported */
+  }
 }
 
 export const useStrengthSession = create<StrengthState>()(
@@ -198,6 +245,7 @@ export const useStrengthSession = create<StrengthState>()(
         lastFlushError: null,
 
         startSession: (bundle) => {
+          requestPersistentStorage();
           const working: Record<string, number | null> = {};
           for (const ex of bundle.exercises) working[ex.id] = suggestWeight(ex);
           const session: Session = {
@@ -230,6 +278,53 @@ export const useStrengthSession = create<StrengthState>()(
               prescription: e.prescription,
             })),
           });
+        },
+
+        resumeSession: (bundle) => {
+          requestPersistentStorage();
+          const exercises = [...bundle.exercises].sort((a, b) => a.order - b.order);
+          const known = new Set(exercises.map((e) => e.id));
+          const sets: SessionSet[] = bundle.sets
+            .filter((x) => known.has(x.workoutExerciseId))
+            .map((x) => ({
+              id: x.id,
+              exerciseId: x.workoutExerciseId,
+              setIndex: x.setIndex,
+              reps: x.reps,
+              weightKg: x.weightKg,
+              quality: x.quality,
+              rpe: x.rpe,
+              isWarmup: x.isWarmup,
+              completedAt: x.completedAt,
+              clientUpdatedAt: x.clientUpdatedAt,
+            }));
+          const working: Record<string, number | null> = {};
+          let currentExerciseIndex = exercises.length ? exercises.length - 1 : 0;
+          for (const [i, ex] of exercises.entries()) {
+            const own = sets.filter((x) => x.exerciseId === ex.id && !x.isWarmup);
+            working[ex.id] = own.length
+              ? (own[own.length - 1]?.weightKg ?? null)
+              : suggestWeight(ex);
+            if (own.length < ex.prescription.sets && i < currentExerciseIndex)
+              currentExerciseIndex = i;
+          }
+          const session: Session = {
+            workoutId: bundle.workoutId,
+            title: bundle.title,
+            date: bundle.date,
+            templateId: bundle.templateId,
+            startedAt: bundle.startedAt ?? nowIso(),
+            finishedAt: null,
+            exercises,
+            sets,
+            currentExerciseIndex,
+            workingWeightKg: working,
+            restEndsAt: null,
+            restTotalSec: 0,
+            seq: 0,
+            finish: null,
+          };
+          set({ session });
         },
 
         resumeOrNull: () => get().session,
@@ -421,38 +516,61 @@ export const useStrengthSession = create<StrengthState>()(
           });
         },
 
+        /**
+         * Post the outbox in batches. Resolves once every queued event has been *attempted*: a call
+         * made while a batch is in flight waits for it and then flushes what is left (so "Terminer"
+         * or sign-out can rely on `outbox.length` afterwards). Stops on error, offline, 401, or when
+         * a batch makes no progress.
+         */
         flushOutbox: async () => {
-          const st = get();
-          if (st.flushing || st.outbox.length === 0) return;
-          if (typeof navigator !== "undefined" && navigator.onLine === false) return;
-          set({ flushing: true, lastFlushError: null });
-          try {
-            const batch = st.outbox.slice(0, 50);
-            const res = await fetch("/api/sync/strength", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ events: batch }),
-            });
-            if (res.status === 401) {
-              set({ lastFlushError: "auth" });
-              return;
-            }
-            if (!res.ok) throw new Error(`sync failed: ${res.status}`);
-            const data = (await res.json()) as { acknowledged: string[] };
-            get().ackEvents(data.acknowledged ?? []);
-          } catch (err) {
-            set({ lastFlushError: err instanceof Error ? err.message : "sync failed" });
-          } finally {
-            set({ flushing: false });
+          if (inflight) {
+            await inflight;
+            if (get().outbox.length > 0 && !get().lastFlushError) await get().flushOutbox();
+            return;
           }
-          if (get().outbox.length > 0 && !get().lastFlushError) void get().flushOutbox();
+          const st = get();
+          if (st.outbox.length === 0) return;
+          if (typeof navigator !== "undefined" && navigator.onLine === false) {
+            set({ lastFlushError: "offline" });
+            return;
+          }
+          const before = st.outbox.length;
+          inflight = (async () => {
+            set({ flushing: true, lastFlushError: null });
+            try {
+              const batch = st.outbox.slice(0, 50);
+              const res = await fetch("/api/sync/strength", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ events: batch }),
+              });
+              if (res.status === 401 || res.status === 403) {
+                set({ lastFlushError: "auth" });
+                return;
+              }
+              if (!res.ok) throw new Error(`sync failed: ${res.status}`);
+              const data = (await res.json()) as { acknowledged: string[] };
+              get().ackEvents(data.acknowledged ?? []);
+            } catch (err) {
+              set({ lastFlushError: err instanceof Error ? err.message : "sync failed" });
+            } finally {
+              set({ flushing: false });
+            }
+          })();
+          try {
+            await inflight;
+          } finally {
+            inflight = null;
+          }
+          const after = get().outbox.length;
+          if (after > 0 && after < before && !get().lastFlushError) await get().flushOutbox();
         },
 
         ackEvents: (ids) => set((st) => ({ outbox: st.outbox.filter((e) => !ids.includes(e.id)) })),
       };
     },
     {
-      name: "athleteos.strength-session.v1",
+      name: STRENGTH_SESSION_STORAGE_KEY,
       storage: createJSONStorage(() => idbStorage),
       skipHydration: true,
       partialize: (st) => ({ session: st.session, outbox: st.outbox }) as unknown as StrengthState,
@@ -460,8 +578,34 @@ export const useStrengthSession = create<StrengthState>()(
   ),
 );
 
-/** Rehydrate from IndexedDB (call once from the session shell); resolves when done. */
-export async function rehydrateStrengthSession(): Promise<void> {
-  await useStrengthSession.persist.rehydrate();
-  useStrengthSession.setState({ hydrated: true });
+let hydration: Promise<void> | null = null;
+
+/**
+ * Rehydrate from IndexedDB once per page lifetime (the shell, the global flusher and the sign-out
+ * flow all call it; a second rehydrate would overwrite in-memory acks with a stale snapshot).
+ */
+export function rehydrateStrengthSession(): Promise<void> {
+  hydration ??= (async () => {
+    await useStrengthSession.persist.rehydrate();
+    useStrengthSession.setState({ hydrated: true });
+  })();
+  return hydration;
+}
+
+/** Whether un-acked events for this workout are still queued (e.g. an offline finish). */
+export function hasPendingEvents(workoutId: string): boolean {
+  return useStrengthSession.getState().outbox.some((e) => e.workoutId === workoutId);
+}
+
+/**
+ * Sign-out / account deletion (ARCHITECTURE §4.6, §7): the persisted session and outbox belong to
+ * the signed-in athlete and must not survive into another account on the same device.
+ */
+export async function clearStrengthSessionStorage(): Promise<void> {
+  useStrengthSession.setState({ session: null, outbox: [], lastFlushError: null });
+  try {
+    await idbDel(STRENGTH_SESSION_STORAGE_KEY);
+  } catch {
+    /* storage unavailable */
+  }
 }

@@ -59,6 +59,7 @@ export async function completeWorkoutAction(input: CompleteWorkoutInput): Promis
     actualDurationMin: parsed.actualDurationMin ?? null,
     notes: parsed.notes,
     score,
+    timezone: user.timezone,
   });
   await recompute(db, user.id, { timezone: user.timezone });
   revalidateWorkout(parsed.workoutId);

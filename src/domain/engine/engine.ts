@@ -213,7 +213,15 @@ export function rescheduleSession(
       .sort();
     return dates[dates.length - 1] ?? null;
   };
-  for (let d = addDays(ctx.today, 1); d <= weekEnd; d = addDays(d, 1)) {
+  // Candidate days are materialised first: an imported call in a `for` update clause whose body
+  // holds closures is mis-compiled by the dev bundler (bare identifier instead of the import).
+  const candidateDays: IsoDate[] = [];
+  for (let k = 1; k <= 7; k++) {
+    const day = addDays(ctx.today, k);
+    if (day > weekEnd) break;
+    candidateDays.push(day);
+  }
+  for (const d of candidateDays) {
     const fixedThatDay = ctx.input.planned.filter((p) => p.fixed && p.date === d);
     if (fixedThatDay.some((p) => p.type === "crossfit")) continue; // don't stack on a class day
     const nextDay = addDays(d, 1);

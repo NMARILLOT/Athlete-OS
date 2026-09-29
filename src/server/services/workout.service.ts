@@ -1,5 +1,5 @@
 import "server-only";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { crossfitWorkouts, workoutAnalyses, workoutExercises, workouts } from "@/db/schema";
 import {
@@ -10,14 +10,26 @@ import {
   type WorkoutType,
 } from "@/domain/core";
 import type { IsoDate } from "@/domain/core/dates";
-import { getCatalogEntry, type LoadProfile, type Option } from "@/domain/engine";
-import { sessionRpeLoad } from "@/domain/load";
+import {
+  catalogToCandidate,
+  getCatalogEntry,
+  type LoadProfile,
+  type Option,
+} from "@/domain/engine";
+import { classifyIntensity, sessionRpeLoad } from "@/domain/load";
 import { scaleTemplateLoadToActual, ACTUAL_SCALING_VERSION } from "@/domain/load";
-import { analyzeWod, type NormalizedWod, type WodAnalysis } from "@/domain/wod";
+import {
+  analyzeWod,
+  type NormalizedWod,
+  type WodAnalysis,
+  type WodMovement,
+  type WodPart,
+} from "@/domain/wod";
 import { getExercise } from "@/domain/exercises";
 import { STRENGTH_TEMPLATES } from "@/domain/strength";
 import { NotFoundError } from "@/server/errors";
-import { instantFor } from "@/server/time";
+import { instantFor, localDate, localMinute } from "@/server/time";
+import { ENGINE_PLANNED_STATUSES, kindOf } from "./engine-input";
 
 export interface CreatedWorkout {
   id: string;
@@ -61,6 +73,77 @@ export function analysisRowFromProfile(
     algorithmVersion,
     confidence: toConfidence(confidence),
   };
+}
+
+/** Server-side Option for a catalog kind (never the client's numbers); null when the kind is unknown. */
+export function optionFromCatalog(kind: string): Option | null {
+  const entry = getCatalogEntry(kind);
+  if (!entry) return null;
+  const c = catalogToCandidate(entry, "catalog");
+  return {
+    kind: c.kind,
+    family: c.family,
+    title: c.title,
+    origin: c.origin,
+    templateId: c.templateId,
+    isTest: c.isTest,
+    testKey: c.testKey,
+    expectedCredits: c.expectedCredits,
+    loadVector: c.loadVector,
+    intensity: c.intensity,
+    heavyStrength: c.heavyStrength,
+    durationMin: c.durationMin,
+    modality: c.modality,
+    patterns: c.patterns,
+    impactUnits: c.impactUnits,
+    score: 0,
+    reason: "Option du catalogue",
+  };
+}
+
+export interface OpenWorkoutRef {
+  id: string;
+  type: WorkoutType;
+  fixed: boolean;
+}
+
+/**
+ * The open session (planned / in progress / replanned) an engine option refers to on `date`: by
+ * `plannedId` when the option carries one, else the first non-fixed session of the same catalog
+ * kind. START reuses it instead of inserting a duplicate row.
+ */
+export async function findOpenWorkoutForOption(
+  db: Db,
+  userId: string,
+  opts: { date: IsoDate; kind: string; plannedId?: string | null },
+): Promise<OpenWorkoutRef | null> {
+  const rows = await db
+    .select({
+      id: workouts.id,
+      type: workouts.type,
+      fixed: workouts.fixed,
+      title: workouts.title,
+      date: workouts.date,
+    })
+    .from(workouts)
+    .where(
+      and(
+        eq(workouts.userId, userId),
+        eq(workouts.date, opts.date),
+        inArray(workouts.status, [...ENGINE_PLANNED_STATUSES]),
+      ),
+    )
+    .orderBy(asc(workouts.startAt), asc(workouts.createdAt));
+  const byId = opts.plannedId ? rows.find((w) => w.id === opts.plannedId) : undefined;
+  const match = byId ?? rows.find((w) => !w.fixed && kindOf(w) === opts.kind);
+  return match ? { id: match.id, type: match.type, fixed: match.fixed } : null;
+}
+
+/** Route that opens a workout in the right mode. */
+export function routeForWorkout(w: { id: string; type: WorkoutType; fixed?: boolean }): string {
+  if (!w.fixed && w.type === "strength") return `/train/strength/${w.id}`;
+  if (!w.fixed && w.type === "cardio") return `/train/cardio/${w.id}`;
+  return `/workouts/${w.id}`;
 }
 
 /** Create a planned workout from an accepted engine option (START on Today). */
@@ -143,9 +226,12 @@ export async function createCrossfitWorkoutFromWod(
     analysis: WodAnalysis;
     inboxItemId: string;
     title?: string;
+    /** Known e1RMs by exercise id (kg): absolute loads become a share of 1RM for the heavy check. */
+    e1rms?: Readonly<Record<string, number>>;
   },
 ): Promise<CreatedWorkout> {
   const a = opts.analysis;
+  const heavyStrength = wodHeavyStrength(opts.wod, a, opts.e1rms);
   const [w] = await db
     .insert(workouts)
     .values({
@@ -184,7 +270,7 @@ export async function createCrossfitWorkoutFromWod(
     energySystems: a.energySystems,
     impactUnits: a.impactUnits,
     intensity: a.intensity,
-    heavyStrength: a.dominant === "strength" || a.dominant === "mixed",
+    heavyStrength,
     source: "CALCULATED",
     inputRef: opts.inboxItemId,
     algorithmVersion: a.algorithmVersion,
@@ -219,7 +305,92 @@ export async function createCrossfitWorkoutFromWod(
   return { id: w.id, type: "crossfit" };
 }
 
-/** Post-session feedback (spec §22) → actual analysis (planned × RPE/duration scaling) + session-RPE load. */
+const COMPOUND_CATEGORIES: ReadonlySet<string> = new Set(["barbell", "olympic"]);
+const HEAVY_PERCENT_1RM = 80;
+const HEAVY_E1RM_RATIO = 0.8;
+const HEAVY_MAX_REPS = 5;
+
+/**
+ * Heavy strength for a class WOD (ENGINE.md: "any compound set at RPE ≥ 8", budget ≤ 3 / 7 days).
+ * `dominant = strength | mixed` only says a strength part exists, whatever its load, so a light
+ * technique piece before the metcon must not burn the heavy budget. Uses `analysis.heavyStrength`
+ * when the analyzer exposes it; otherwise a strength-part compound lift (barbell / olympic) counts
+ * when prescribed `heavy` / `build`, ≥ 80 %1RM, ≥ 0.8 × a known e1RM, or — with no usable load
+ * reference — at ≤ 5 reps per set. Everything else (light, %, hypertrophy volume) is not heavy.
+ */
+export function wodHeavyStrength(
+  wod: NormalizedWod,
+  analysis: WodAnalysis,
+  e1rms: Readonly<Record<string, number>> = {},
+): boolean {
+  const declared = (analysis as { heavyStrength?: unknown }).heavyStrength;
+  if (typeof declared === "boolean") return declared;
+  return wod.parts.some(
+    (part) =>
+      part.kind === "strength" && part.movements.some((m) => isHeavyStrengthSet(part, m, e1rms)),
+  );
+}
+
+function isHeavyStrengthSet(
+  part: WodPart,
+  m: WodMovement,
+  e1rms: Readonly<Record<string, number>>,
+): boolean {
+  const def = m.exerciseId ? getExercise(m.exerciseId) : undefined;
+  if (!def || !COMPOUND_CATEGORIES.has(def.category)) return false;
+  const load = m.load;
+  if (load?.qualifier) return load.qualifier === "heavy" || load.qualifier === "build";
+  if (load?.unit === "percent_1rm") return load.value >= HEAVY_PERCENT_1RM;
+  const kg = load
+    ? load.unit === "kg"
+      ? load.value
+      : load.unit === "lb"
+        ? load.value * 0.4536
+        : null
+    : null;
+  const e1rm = e1rms[def.id];
+  if (kg != null && kg > 0 && e1rm && e1rm > 0) return kg / e1rm >= HEAVY_E1RM_RATIO;
+  const reps = m.reps ?? part.reps ?? m.repScheme?.[0] ?? part.repScheme?.[0] ?? null;
+  return reps != null && reps > 0 && reps <= HEAVY_MAX_REPS;
+}
+
+const BAND_RANK: Record<IntensityBand, number> = { easy: 0, moderate: 1, hard: 2 };
+
+/**
+ * Realised band after feedback: the deterministic classifier (metabolic axis, ENGINE.md) over the
+ * RPE-scaled load, RPE and heavy-strength flag — upgrade only, since the stored analysis no longer
+ * carries the parse-time signals (metcon time domain, benchmark, cardio kind) that made it hard.
+ */
+export function realisedBandFromFeedback(
+  base: IntensityBand | null,
+  input: {
+    loadVector: LoadProfile["loadVector"] | null;
+    rpe: number | null;
+    heavyStrength: boolean;
+  },
+): IntensityBand | null {
+  if (input.rpe == null) return base;
+  const band = classifyIntensity({
+    loadVector: input.loadVector,
+    rpe: input.rpe,
+    heavyStrength: input.heavyStrength,
+  }).band;
+  if (!base) return band;
+  return BAND_RANK[band] > BAND_RANK[base] ? band : base;
+}
+
+/**
+ * Post-session feedback (spec §22) → actual analysis (planned × RPE/duration scaling) + session-RPE
+ * load. Rules:
+ *  - the actual duration is persisted only when someone measured or declared it (the planned
+ *    duration serves the load computation but is never stored as "réelle");
+ *  - `finished_at` is the feedback time on the day of the session; late feedback (a later local
+ *    day) is stamped at the planned end (start + duration), never "now";
+ *  - the realised intensity is upgraded from the RPE (`realisedBandFromFeedback`) unless given;
+ *  - "Modifier le ressenti" on a workout finished by a specialised path (strength tracker,
+ *    Garmin/FIT import, coaching) only touches rpe / feeling / pain / notes / session-RPE load:
+ *    their measured duration, finish time, realised intensity and actual analysis are kept.
+ */
 export async function completeWorkout(
   db: Db,
   userId: string,
@@ -239,6 +410,9 @@ export async function completeWorkout(
       rx: boolean;
       scaledNotes?: string;
     } | null;
+    /** Feedback instant (default: now) and athlete timezone, to detect late feedback. */
+    now?: Date;
+    timezone?: string;
   },
 ): Promise<void> {
   const [w] = await db
@@ -247,8 +421,59 @@ export async function completeWorkout(
     .where(and(eq(workouts.id, opts.workoutId), eq(workouts.userId, userId)))
     .limit(1);
   if (!w) throw new NotFoundError("Séance");
-  const durationMin = opts.actualDurationMin ?? w.actualDurationMin ?? w.plannedDurationMin ?? 45;
-  const load = sessionRpeLoad(durationMin, opts.rpe);
+  const now = opts.now ?? new Date();
+  const timezone = opts.timezone ?? "UTC";
+  const alreadyDone = w.status === "done";
+  const [planned] = await db
+    .select()
+    .from(workoutAnalyses)
+    .where(and(eq(workoutAnalyses.workoutId, w.id), eq(workoutAnalyses.phase, "planned")))
+    .limit(1);
+  const [existingActual] = await db
+    .select({ algorithmVersion: workoutAnalyses.algorithmVersion })
+    .from(workoutAnalyses)
+    .where(and(eq(workoutAnalyses.workoutId, w.id), eq(workoutAnalyses.phase, "actual")))
+    .limit(1);
+  // The actual row is ours when absent or produced by this planned-scaling path; strength_actual_v1,
+  // activity_v1 and coach_session_v1 rows belong to their finisher and are never overwritten.
+  const managedActual =
+    !existingActual || existingActual.algorithmVersion.endsWith(`+${ACTUAL_SCALING_VERSION}`);
+  const keepSpecialised = alreadyDone && !managedActual;
+
+  const actualDurationMin = opts.actualDurationMin ?? w.actualDurationMin ?? null;
+  const durationMin = actualDurationMin ?? w.plannedDurationMin ?? null;
+  const load = durationMin != null ? sessionRpeLoad(durationMin, opts.rpe) : null;
+  const scaled = planned
+    ? scaleTemplateLoadToActual(planned.loadVector, {
+        rpe: opts.rpe,
+        expectedRpe: w.expectedRpe,
+        actualMin: durationMin,
+        plannedMin: w.plannedDurationMin,
+      })
+    : null;
+  // A measured band (activity import: HR zones) is the floor; otherwise start from the plan.
+  const baseBand =
+    w.intensitySource === "CALCULATED" && w.realisedIntensity
+      ? w.realisedIntensity
+      : (planned?.intensity ?? w.realisedIntensity ?? w.plannedIntensity ?? null);
+  const realisedIntensity = keepSpecialised
+    ? w.realisedIntensity
+    : (opts.realisedIntensity ??
+      realisedBandFromFeedback(baseBand, {
+        loadVector: scaled?.loadVector ?? null,
+        rpe: opts.rpe,
+        heavyStrength: planned?.heavyStrength ?? w.type === "strength",
+      }));
+  const intensitySource =
+    !keepSpecialised && !opts.realisedIntensity && realisedIntensity !== baseBand
+      ? "CALCULATED"
+      : w.intensitySource;
+  const lateFeedback = localDate(now, timezone) > w.date;
+  const plannedEnd = new Date(
+    (w.startAt ?? instantFor(w.date, 17 * 60, timezone)).getTime() + (durationMin ?? 0) * 60000,
+  );
+  const finishedAt = opts.finishedAt ?? w.finishedAt ?? (lateFeedback ? plannedEnd : now);
+
   await db
     .update(workouts)
     .set({
@@ -256,11 +481,15 @@ export async function completeWorkout(
       rpe: opts.rpe,
       feeling: opts.feeling,
       painReported: opts.painReported,
-      actualDurationMin: durationMin,
-      finishedAt: opts.finishedAt ?? new Date(),
       notes: opts.notes ?? w.notes,
-      sessionRpeLoad: load,
-      realisedIntensity: opts.realisedIntensity ?? w.plannedIntensity,
+      sessionRpeLoad: keepSpecialised
+        ? w.actualDurationMin != null
+          ? sessionRpeLoad(w.actualDurationMin, opts.rpe)
+          : load
+        : load,
+      ...(keepSpecialised
+        ? {}
+        : { actualDurationMin, finishedAt, realisedIntensity, intensitySource }),
     })
     .where(eq(workouts.id, w.id));
   if (opts.score)
@@ -277,18 +506,8 @@ export async function completeWorkout(
       })
       .where(and(eq(crossfitWorkouts.workoutId, w.id), eq(crossfitWorkouts.userId, userId)));
 
-  const [planned] = await db
-    .select()
-    .from(workoutAnalyses)
-    .where(and(eq(workoutAnalyses.workoutId, w.id), eq(workoutAnalyses.phase, "planned")))
-    .limit(1);
-  if (planned) {
-    const scaled = scaleTemplateLoadToActual(planned.loadVector, {
-      rpe: opts.rpe,
-      expectedRpe: w.expectedRpe,
-      actualMin: durationMin,
-      plannedMin: w.plannedDurationMin,
-    });
+  if (planned && scaled && managedActual) {
+    const intensity = realisedIntensity ?? planned.intensity;
     await db
       .insert(workoutAnalyses)
       .values({
@@ -302,7 +521,7 @@ export async function completeWorkout(
         muscleExposure: planned.muscleExposure,
         energySystems: planned.energySystems,
         impactUnits: planned.impactUnits,
-        intensity: opts.realisedIntensity ?? planned.intensity,
+        intensity,
         heavyStrength: planned.heavyStrength,
         source: "CALCULATED",
         inputRef: planned.inputRef,
@@ -312,11 +531,7 @@ export async function completeWorkout(
       })
       .onConflictDoUpdate({
         target: [workoutAnalyses.workoutId, workoutAnalyses.phase],
-        set: {
-          loadVector: scaled.loadVector,
-          intensity: opts.realisedIntensity ?? planned.intensity,
-          computedAt: new Date(),
-        },
+        set: { loadVector: scaled.loadVector, intensity, computedAt: new Date() },
       });
   }
 }
@@ -341,9 +556,7 @@ export async function moveWorkout(
     .where(and(eq(workouts.id, workoutId), eq(workouts.userId, userId)))
     .limit(1);
   if (!w) throw new NotFoundError("Séance");
-  const minute = w.startAt
-    ? Math.round(((w.startAt.getTime() - instantFor(w.date, 0, timezone).getTime()) / 60000) % 1440)
-    : null;
+  const minute = w.startAt ? localMinute(w.startAt, timezone) : null;
   await db
     .update(workouts)
     .set({
@@ -376,6 +589,7 @@ export async function logQuickWorkout(
   },
 ): Promise<CreatedWorkout> {
   const catalog = opts.kind ? getCatalogEntry(opts.kind) : undefined;
+  const now = new Date();
   const [w] = await db
     .insert(workouts)
     .values({
@@ -393,7 +607,7 @@ export async function logQuickWorkout(
       rpe: opts.rpe,
       feeling: opts.feeling,
       sessionRpeLoad: sessionRpeLoad(opts.durationMin, opts.rpe),
-      finishedAt: new Date(),
+      finishedAt: backDatedFinish(opts.date, null, opts.durationMin, opts.timezone, now),
     })
     .returning({ id: workouts.id });
   if (!w) throw new Error("workout insert failed");
@@ -429,6 +643,23 @@ export async function logQuickWorkout(
     });
   }
   return { id: w.id, type: opts.type };
+}
+
+/**
+ * Finish instant of a logged (done) session: the log time when logged on the day itself, else the
+ * declared start + duration, else 17:00 local + duration on the session's date — never the log
+ * time of a later day (residual fatigue decays from this instant).
+ */
+export function backDatedFinish(
+  date: IsoDate,
+  startAt: Date | null,
+  durationMin: number,
+  timezone: string,
+  now: Date = new Date(),
+): Date {
+  if (startAt) return new Date(startAt.getTime() + durationMin * 60000);
+  if (localDate(now, timezone) <= date) return now;
+  return new Date(instantFor(date, 17 * 60, timezone).getTime() + durationMin * 60000);
 }
 
 export function funScoreOf(feeling: Feeling | null): number | null {

@@ -11,8 +11,8 @@ import {
 } from "@/db/schema";
 import type { IntensityBand, LoadVector, PainLocation } from "@/domain/core";
 import type { IsoDate } from "@/domain/core/dates";
-import { sessionRpeLoad } from "@/domain/load";
 import { instantFor, localDate } from "@/server/time";
+import { backDatedFinish } from "./workout.service";
 
 /**
  * "+" palette log targets (spec §84–88): coaching sessions (§24), rest days, body composition (§25)
@@ -59,11 +59,12 @@ export function coachSessionLoadVector(demoLevel: DemoLevel, standingMinutes: nu
   };
 }
 
-/** Perceived fatigue 1..5 → session RPE 1..10 (×2, capped), documented mapping. */
-export function coachRpeFromFatigue(perceivedFatigue: number): number {
-  return Math.max(1, Math.min(10, Math.round(perceivedFatigue * 2)));
-}
-
+/**
+ * A coaching session is not the athlete's own effort: `perceived_fatigue` stays in
+ * `coach_sessions`, `workouts.rpe` and the session-RPE load remain null (spec §20: RPE is the
+ * athlete's rating of *their* session, §24: coaching is not automatically a workout). Its small
+ * physical load lives in the ACTUAL analysis (`coachSessionLoadVector`) only.
+ */
 export async function logCoachSession(
   db: Db,
   userId: string,
@@ -78,8 +79,9 @@ export async function logCoachSession(
     notes?: string;
   },
 ): Promise<{ id: string }> {
-  const rpe = coachRpeFromFatigue(input.perceivedFatigue);
   const intensity = COACH_SESSION_LOAD[input.demoLevel].intensity;
+  const startAt =
+    input.startMinute != null ? instantFor(input.date, input.startMinute, input.timezone) : null;
   const [w] = await db
     .insert(workouts)
     .values({
@@ -88,21 +90,18 @@ export async function logCoachSession(
       source: "manual",
       status: "done",
       date: input.date,
-      startAt:
-        input.startMinute != null
-          ? instantFor(input.date, input.startMinute, input.timezone)
-          : null,
+      startAt,
       plannedDurationMin: input.durationMin,
       actualDurationMin: input.durationMin,
       title: "Coaching CrossFit",
       plannedIntensity: intensity,
       realisedIntensity: intensity,
       intensitySource: "CALCULATED",
-      rpe,
-      sessionRpeLoad: sessionRpeLoad(input.durationMin, rpe),
+      rpe: null,
+      sessionRpeLoad: null,
       fixed: true,
       notes: input.notes ?? "",
-      finishedAt: new Date(),
+      finishedAt: backDatedFinish(input.date, startAt, input.durationMin, input.timezone),
     })
     .returning({ id: workouts.id });
   if (!w) throw new Error("workout insert failed");

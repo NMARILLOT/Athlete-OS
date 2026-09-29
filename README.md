@@ -47,7 +47,8 @@ src/components/ UI primitives and feature components · src/stores/ offline-firs
 ## Production
 
 Set `DATABASE_URL` (Supabase pooler, port 6543), `DIRECT_DATABASE_URL` (5432, migrations only), `AUTH_MODE=supabase`,
-Supabase URL/anon key, `ALLOWED_EMAILS`, `CRON_SECRET`. Disable sign-ups in the Supabase project. Run `npm run db:migrate`
+Supabase URL/anon key, `ALLOWED_EMAILS` (mandatory: with `AUTH_MODE=supabase` the app refuses to boot in production / on
+Vercel when the allow-list is empty), `CRON_SECRET`. Disable sign-ups in the Supabase project. Run `npm run db:migrate`
 against `DIRECT_DATABASE_URL` before promoting a deploy. One Vercel Cron: `/api/cron/daily`.
 
 Garmin's official APIs require Developer Program approval; until then `GARMIN_PROVIDER=mock` and manual FIT import.

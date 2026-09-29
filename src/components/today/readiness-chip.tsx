@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { declareReadinessAction } from "@/app/(app)/today/actions";
+import { isNextRedirect } from "@/lib/next-redirect";
 import type { ReadinessDeclaredView } from "@/server/services/view-models";
 
 const ENERGY = [
@@ -26,20 +27,28 @@ export function ReadinessChip({
   const [soreness, setSoreness] = useState<number | null>(declared?.soreness ?? null);
   const [motivation, setMotivation] = useState<number | null>(declared?.motivation ?? null);
   const [pain, setPain] = useState<boolean>(declared?.unusualPain ?? false);
+  const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
 
   function save() {
     if (energy == null || soreness == null || motivation == null) return;
+    setError(null);
     start(async () => {
-      await declareReadinessAction({
-        date,
-        energy: energy as 1 | 2 | 3,
-        soreness: soreness as 0 | 1 | 2 | 3,
-        motivation: motivation as 1 | 2 | 3,
-        unusualPain: pain,
-      });
-      setOpen(false);
-      router.refresh();
+      try {
+        await declareReadinessAction({
+          date,
+          energy: energy as 1 | 2 | 3,
+          soreness: soreness as 0 | 1 | 2 | 3,
+          motivation: motivation as 1 | 2 | 3,
+          unusualPain: pain,
+        });
+        setOpen(false);
+        router.refresh();
+      } catch (err) {
+        if (isNextRedirect(err)) throw err;
+        // The sheet stays open with the taps kept: nothing to redo.
+        setError("Impossible d'enregistrer pour le moment. Vérifie ta connexion et réessaie.");
+      }
     });
   }
 
@@ -102,6 +111,14 @@ export function ReadinessChip({
             {pain ? (
               <p className="mt-2 text-sm text-fg-muted">
                 Tu pourras préciser la localisation via + → Douleur.
+              </p>
+            ) : null}
+            {error ? (
+              <p
+                role="alert"
+                className="mt-3 rounded-xl bg-danger/10 px-3 py-2 text-sm text-danger"
+              >
+                {error}
               </p>
             ) : null}
             <button

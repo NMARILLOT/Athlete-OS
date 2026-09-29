@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { MOVEMENT_PATTERN_VALUES, MUSCLE_GROUP_VALUES } from "@/domain/core";
 import { addDays } from "@/domain/core/dates";
+import type { ProgressPageView } from "@/server/services/progress.service";
 import type { ProgressView } from "@/server/services/view-models";
+import { describeComparableGroup } from "@/components/activities/labels";
 import { Card, CardTitle } from "@/components/ui/card";
 import { Empty } from "@/components/ui/empty";
 import { cn } from "@/lib/cn";
@@ -392,35 +394,67 @@ export function StrengthSection({
 // Moteur aérobie
 // ---------------------------------------------------------------------------
 
+/** Literal Tailwind classes, one per comparable-group series (cycled past five groups). */
+const GROUP_PALETTE: ReadonlyArray<{ stroke: string; fill: string; swatch: string }> = [
+  { stroke: "stroke-cardio-easy", fill: "fill-cardio-easy", swatch: "bg-cardio-easy" },
+  { stroke: "stroke-info", fill: "fill-info", swatch: "bg-info" },
+  { stroke: "stroke-strength", fill: "fill-strength", swatch: "bg-strength" },
+  { stroke: "stroke-crossfit", fill: "fill-crossfit", swatch: "bg-crossfit" },
+  { stroke: "stroke-coaching", fill: "fill-coaching", swatch: "bg-coaching" },
+];
+
+function paletteAt(i: number): (typeof GROUP_PALETTE)[number] {
+  return (
+    GROUP_PALETTE[i % GROUP_PALETTE.length] ?? {
+      stroke: "stroke-cardio-easy",
+      fill: "fill-cardio-easy",
+      swatch: "bg-cardio-easy",
+    }
+  );
+}
+
+/**
+ * Aerobic engine (spec §17, §30): pace @ HR as ONE scatter series per comparable group — a 45-min
+ * flat run and a 2-h hilly long run are never drawn as one trend — plus the estimated threshold
+ * pace. Each point says what it is: the whole-activity average pace at the average HR, or the
+ * versioned "allure à FC" metric over the steady samples in zone 2.
+ */
 export function EngineSection({
   engine,
   from,
   to,
 }: {
-  engine: ProgressView["engine"];
+  engine: ProgressPageView["engine"];
   from: string;
   to: string;
 }) {
-  const bands = [...new Set(engine.paceAtHr.map((p) => p.hrBand))].sort();
+  const groups = engine.paceAtHr;
+  const allPoints = groups.flatMap((g) => g.points);
+  const bands = [...new Set(allPoints.map((p) => p.hrBand))].sort();
   const opacityFor = (band: string) => {
     const i = bands.indexOf(band);
     return bands.length <= 1 ? 1 : 0.35 + (0.65 * i) / (bands.length - 1);
   };
-  const series: LineSeries[] = [];
-  if (engine.paceAtHr.length > 0)
-    series.push({
-      key: "pace",
-      label: "Allure sur sorties faciles (mesuré)",
-      stroke: "stroke-cardio-easy",
-      fill: "fill-cardio-easy",
+  const hasSteady = allPoints.some((p) => p.basis === "pace_at_hr");
+  const series: LineSeries[] = groups.map((g, i) => {
+    const colour = paletteAt(i);
+    return {
+      key: `pace-${g.comparableGroup}`,
+      label: `${describeComparableGroup(g.comparableGroup)} (mesuré)`,
+      stroke: colour.stroke,
+      fill: colour.fill,
       scatter: true,
-      points: engine.paceAtHr.map((p) => ({
+      points: g.points.map((p) => ({
         x: dayIndex(from, p.date),
         y: p.paceSecKm,
         opacity: opacityFor(p.hrBand),
-        title: `${formatDateShort(p.date)} : ${formatPace(p.paceSecKm)} à ${p.hrBand} bpm`,
+        title:
+          p.basis === "pace_at_hr"
+            ? `${formatDateShort(p.date)} : ${formatPace(p.paceSecKm)} à ${p.hrBand} bpm (portions stables en zone 2)`
+            : `${formatDateShort(p.date)} : ${formatPace(p.paceSecKm)} en moyenne sur la sortie, FC moyenne ${p.hrBand} bpm`,
       })),
-    });
+    };
+  });
   if (engine.thresholdPace.length > 0)
     series.push({
       key: "threshold",
@@ -447,7 +481,7 @@ export function EngineSection({
           {series.length > 0 ? (
             <div className="mt-3">
               <LineChart
-                ariaLabel="Allure à fréquence cardiaque sur sorties faciles comparables, et allure seuil estimée"
+                ariaLabel="Allure à fréquence cardiaque par groupe de sorties faciles comparables, et allure seuil estimée"
                 series={series}
                 xTicks={dateTicks(from, to)}
                 xDomain={[0, Math.max(1, dayIndex(from, to))]}
@@ -458,17 +492,23 @@ export function EngineSection({
               <p className="mt-1 text-[11px] text-fg-subtle">min/km — plus haut = plus rapide.</p>
               <Legend
                 items={[
-                  ...(engine.paceAtHr.length > 0
-                    ? bands.map((b) => ({ label: `${b} bpm`, swatch: "bg-cardio-easy" }))
-                    : []),
+                  ...groups.map((g, i) => ({
+                    label: describeComparableGroup(g.comparableGroup),
+                    swatch: paletteAt(i).swatch,
+                  })),
                   ...(engine.thresholdPace.length > 0
                     ? [{ label: "Seuil ≈ (pointillés)", swatch: "bg-cardio-hard" }]
                     : []),
                 ]}
               />
-              {engine.paceAtHr.length > 0 ? (
+              {groups.length > 0 ? (
                 <p className="mt-1 text-[11px] text-fg-subtle">
-                  Points plus clairs = FC plus basse. Sorties faciles comparables uniquement.
+                  Une série par groupe de sorties comparables (terrain · durée), jamais mélangées.
+                  Chaque point = allure moyenne sur la sortie à la FC moyenne
+                  {hasSteady
+                    ? ", ou allure des portions stables en zone 2 quand la métrique « allure à FC » existe (voir l'info-bulle)"
+                    : ""}
+                  . Points plus clairs = FC plus basse.
                 </p>
               ) : null}
             </div>

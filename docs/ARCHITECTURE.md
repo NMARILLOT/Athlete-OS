@@ -126,7 +126,8 @@ non-blocking tail (PR detection, ledger rollups, computed metrics) runs in Next'
    one transaction, idempotent via `client_events (id)`; acknowledged ids are pruned client-side. All ids client-generated
    (`workouts`, `workout_exercises`, `strength_sets`). Flush on `online`, `visibilitychange`, after each event when online, on app open.
 5. **Finish.** `session_finished` carries RPE / feeling / pain; the server computes e1RM, PRs, `workout_analyses.actual`, then `recompute`.
-6. Logout flushes the outbox first and is refused while it is non-empty; on 401 the client keeps IndexedDB, re-authenticates, then flushes.
+6. Logout is a client flow (`SignOutButton`): rehydrate → flush the outbox → refuse while it is non-empty → post `LOGOUT` to the service worker → clear the IndexedDB session → server sign-out. On 401/403 the client keeps IndexedDB, re-authenticates, then flushes. The outbox is also flushed by the root-mounted `RegisterServiceWorker` on app open, every route change, `online` and `visibilitychange`, so a session finished offline reaches the server without reopening the shell; `navigator.storage.persist()` is requested on first run.
+7. The server never revives a closed workout: `session_started` / `session_finished` on a `done` or `skipped` row are acknowledged and ignored; the shell shows "Séance terminée" instead of re-seeding, and a session left `in_progress` for more than a day is closed by the daily job with what was logged (RPE null → `MISSING_RPE`).
 
 ### WOD Inbox flow (spec §49)
 `Today[JE VAIS AU CROSSFIT]` records intent `going_crossfit` → `/inbox/new?for=DATE` (textarea, paste, quick chips) →

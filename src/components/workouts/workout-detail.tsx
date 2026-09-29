@@ -70,7 +70,10 @@ export function WorkoutHeader({ w }: { w: WorkoutDetailView }) {
           ? "info"
           : "neutral";
   const intensity = w.realisedIntensity ?? w.plannedIntensity;
-  const duration = w.status === "done" ? w.actualDurationMin : w.plannedDurationMin;
+  // A done session without a measured/declared duration shows the planned one, flagged "≈ prévue".
+  const durationMeasured = w.status === "done" && w.actualDurationMin != null;
+  const duration =
+    w.status === "done" ? (w.actualDurationMin ?? w.plannedDurationMin) : w.plannedDurationMin;
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -89,7 +92,8 @@ export function WorkoutHeader({ w }: { w: WorkoutDetailView }) {
           <Stat
             label="Durée"
             value={duration ? formatMinutes(duration) : null}
-            hint={w.status === "done" ? "réelle" : "prévue"}
+            estimated={w.status === "done" && !durationMeasured}
+            hint={durationMeasured ? "réelle" : w.status === "done" ? "≈ prévue" : "prévue"}
           />
           <Stat
             label="Intensité"
@@ -520,7 +524,9 @@ export function ActivitiesBlock({ list }: { list: LinkedActivityView[] }) {
         ))}
       </ul>
       <p className="mt-2 text-[11px] text-fg-subtle">
-        Mesuré ({list[0]?.provider === "garmin" ? "Garmin" : "fichier FIT"}).
+        {list[0]?.provider === "garmin_mock"
+          ? "Simulé (mock Garmin de développement)."
+          : `Mesuré (${list[0]?.provider === "garmin" ? "Garmin" : "fichier FIT"}).`}
       </p>
     </Card>
   );

@@ -8,7 +8,13 @@ import { NormalizedWodSchema, type NormalizedWod } from "@/domain/wod";
 import { env } from "@/server/env";
 import { log, errorFields } from "@/server/logging";
 import { MockAiProvider } from "./mock";
-import { hashInput, type AiProvider, type AiResult, type ExplainInput } from "./types";
+import {
+  hashInput,
+  type AiCallKey,
+  type AiProvider,
+  type AiResult,
+  type ExplainInput,
+} from "./types";
 
 const PROMPT_VERSION_PARSE_WOD = "parse_wod_v1";
 const PROMPT_VERSION_PARSE_INTENT = "parse_intent_v1";
@@ -63,18 +69,39 @@ export class AnthropicAiProvider implements AiProvider {
     this.client = new Anthropic({ apiKey, maxRetries: 1, timeout: 30_000 });
   }
 
+  parseWodKey(input: { text: string; imageBase64?: string }): AiCallKey {
+    return {
+      kind: "parse_wod",
+      model: env().AI_MODEL_PARSER,
+      promptVersion: PROMPT_VERSION_PARSE_WOD,
+      inputHash: hashInput({
+        text: input.text,
+        image: input.imageBase64 ? input.imageBase64.length : 0,
+        v: PROMPT_VERSION_PARSE_WOD,
+      }),
+    };
+  }
+
+  parseIntentKey(input: { text: string; today: string }): AiCallKey {
+    return {
+      kind: "parse_intent",
+      model: env().AI_MODEL_PARSER,
+      promptVersion: PROMPT_VERSION_PARSE_INTENT,
+      inputHash: hashInput({
+        text: input.text,
+        today: input.today,
+        v: PROMPT_VERSION_PARSE_INTENT,
+      }),
+    };
+  }
+
   async parseWod(input: {
     text: string;
     imageBase64?: string;
     imageMediaType?: "image/jpeg" | "image/png" | "image/webp";
   }): Promise<AiResult<NormalizedWod>> {
     const start = Date.now();
-    const model = env().AI_MODEL_PARSER;
-    const inputHash = hashInput({
-      text: input.text,
-      image: input.imageBase64 ? input.imageBase64.length : 0,
-      v: PROMPT_VERSION_PARSE_WOD,
-    });
+    const { model, inputHash } = this.parseWodKey(input);
     try {
       const content: Anthropic.ContentBlockParam[] = [];
       if (input.imageBase64 && input.imageMediaType)
@@ -142,8 +169,7 @@ export class AnthropicAiProvider implements AiProvider {
     tomorrow: string;
   }): Promise<AiResult<UserIntent>> {
     const start = Date.now();
-    const model = env().AI_MODEL_PARSER;
-    const inputHash = hashInput({ text: input.text, v: PROMPT_VERSION_PARSE_INTENT });
+    const { model, inputHash } = this.parseIntentKey(input);
     try {
       const response = await this.client.messages.parse({
         model,

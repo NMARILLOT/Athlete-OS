@@ -106,7 +106,20 @@ awaited before revalidation; tails run in `after()`. `sync_jobs` is an idempoten
 ## ADR-021 — Auth fails closed; email/password or OTP only; `requireUser()` everywhere
 **Decision.** `AUTH_MODE` defaults to `supabase`; `local` only off-Vercel and off-production. Sign-ups disabled + `ALLOWED_EMAILS`.
 `requireUser()` first line of every action/route handler. `src/proxy.ts` refreshes cookies. No magic links / OAuth in MVP 1 (iOS standalone storage silo).
+`ALLOWED_EMAILS` is mandatory in production with `AUTH_MODE=supabase` (empty allow-list = boot refused). `?next=` is sanitised to a same-origin path (`safeNextPath`).
 
 ## ADR-022 — Layer B outputs are structure-only and budgeted
 **Decision.** `NormalizedWod` is `.strict()` and carries no physiology; intents are bounded structs with fixed bonuses; `explain` is
 display-only with a post-check; per-kind daily caps and 30 s timeouts; identical inputs reuse the stored valid output.
+Implemented in `ai-invocations.service.ts`: reuse keyed by `(kind, prompt_version, model, input_hash)`, per-user per-kind cap over a rolling 24 h
+window (`AI_DAILY_CAP_PARSE_WOD` 30, `AI_DAILY_CAP_PARSE_INTENT` 50); capped or failed calls degrade to the heuristic parsers.
+
+## ADR-023 — Review-round invariants (intents, moves, provenance)
+**Decision.** A single-day intent applies only on its `starts_on` day (ranged intents on `starts_on ≤ today ≤ ends_on`); the daily job
+withdraws stale ones. A user-moved workout keeps status `auto_adjusted` and stays in the engine's planned set (`ENGINE_PLANNED_STATUSES`).
+Engine reschedules are proposed on Today ("Replanification proposée") and applied only by the athlete. Logged rest days carry a zero load
+vector. A WOD is `heavy_strength` only when its analysis says so. `realised_intensity` comes from measured HR zones when an activity is
+linked (source `CALCULATED`) and is otherwise upgraded from the RPE via the versioned classifier, never downgraded. Declared LTHR zones and
+declared PRs are `MEDIUM` confidence; mock Garmin data is `provider = garmin_mock` / source `MOCK` and refused in production unless
+`FLAG_GARMIN_MOCK_IN_PROD` is set. `finished_at` for late feedback is the planned end of the session, not the feedback time.
+

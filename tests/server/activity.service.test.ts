@@ -257,6 +257,9 @@ describe("importFitFile", () => {
     expect(sets).toHaveLength(1);
     expect(sets[0]?.method).toBe("lthr");
     expect(sets[0]?.lthr).toBe(170);
+    // A hand-typed LTHR is declared, not measured: MEDIUM, never HIGH (spec §16, §70).
+    expect(sets[0]?.source).toBe("USER");
+    expect(sets[0]?.confidence).toBe("MEDIUM");
     const detail = await getActivityDetail(
       db(),
       USER_A,
@@ -381,7 +384,9 @@ describe("importFitFile", () => {
     const [done] = await db().select().from(schema.workouts).where(eq(schema.workouts.id, w.id));
     expect(done?.status).toBe("done");
     expect(done?.actualDurationMin).toBe(30);
-    expect(done?.realisedIntensity).toBe("easy"); // planned intensity, not guessed from HR
+    // Measured from the zone distribution: 30 min around 145 bpm (85 % of LTHR 170) is Z1–Z2.
+    expect(done?.realisedIntensity).toBe("easy");
+    expect(done?.intensitySource).toBe("CALCULATED");
     expect(done?.finishedAt?.toISOString()).toBe(`${date}T07:00:00.000Z`);
 
     const [actual] = await db()
@@ -413,6 +418,125 @@ describe("importFitFile", () => {
     expect(created).toHaveLength(1);
   });
 
+  async function planEasyRun(date: string) {
+    const preset = CARDIO_PRESETS.run_easy_45;
+    const [w] = await db()
+      .insert(schema.workouts)
+      .values({
+        userId: USER_A,
+        type: "cardio",
+        source: "planned_user",
+        status: "planned",
+        date,
+        plannedDurationMin: 45,
+        title: preset.title,
+        plannedIntensity: "easy",
+        intensitySource: "USER",
+        expectedRpe: 4,
+      })
+      .returning();
+    if (!w) throw new Error("workout insert failed");
+    await db().insert(schema.cardioWorkouts).values({
+      userId: USER_A,
+      workoutId: w.id,
+      modality: "running",
+      workoutKind: "zone2",
+      steps: preset.steps,
+    });
+    await db()
+      .insert(schema.workoutAnalyses)
+      .values({
+        userId: USER_A,
+        workoutId: w.id,
+        phase: "planned",
+        date,
+        ...analysisRowFromProfile(
+          expectedLoadProfile(preset),
+          "CALCULATED",
+          CARDIO_BUILDER_ALGORITHM_VERSION,
+          1,
+          "run_easy_45",
+        ),
+      });
+    return w;
+  }
+
+  it("classifies a Zone 2 plan run as a tempo from the measured HR zones (hard, CALCULATED)", async () => {
+    const date = "2026-10-01";
+    const w = await planEasyRun(date);
+    // 20 min at ≈ 165 bpm = 97 % of LTHR 170 → Z4: ≥ 10 min in Z4–Z5, whatever the plan said.
+    const result = await importFitFile(
+      db(),
+      userA,
+      buildRunFit({ start: `${date}T06:30:00Z`, durationSec: 1200, speedMps: 3.3, hr: 165 }),
+      "tempo.fit",
+    );
+    expect(result.workoutId).toBe(w.id);
+    const [done] = await db().select().from(schema.workouts).where(eq(schema.workouts.id, w.id));
+    expect(done?.status).toBe("done");
+    expect(done?.plannedIntensity).toBe("easy");
+    expect(done?.realisedIntensity).toBe("hard");
+    expect(done?.intensitySource).toBe("CALCULATED");
+    const [actual] = await db()
+      .select()
+      .from(schema.workoutAnalyses)
+      .where(
+        and(eq(schema.workoutAnalyses.workoutId, w.id), eq(schema.workoutAnalyses.phase, "actual")),
+      );
+    expect(actual?.intensity).toBe("hard"); // the engine counts it in hardDone6d
+    const [a] = await db()
+      .select()
+      .from(schema.activities)
+      .where(eq(schema.activities.id, result.activityId));
+    expect(a?.comparableGroup).toMatch(/^hard_run_/); // activity chip and workout agree
+  });
+
+  it("keeps the planned band and its declared source when the activity has no HR", async () => {
+    const date = "2026-10-02";
+    const w = await planEasyRun(date);
+    const result = await importFitFile(
+      db(),
+      userA,
+      buildRunFit({ start: `${date}T06:30:00Z`, durationSec: 1200, speedMps: 3.3, hr: null }),
+      "no-hr.fit",
+    );
+    expect(result.workoutId).toBe(w.id);
+    const [done] = await db().select().from(schema.workouts).where(eq(schema.workouts.id, w.id));
+    expect(done?.realisedIntensity).toBe("easy"); // nothing measured → the plan's band …
+    expect(done?.intensitySource).toBe("USER"); // … with the plan's source, never "CALCULATED"
+  });
+
+  it("stores a versioned pace @ HR metric (Z2 band of the zone set) for a steady easy run", async () => {
+    const date = "2026-10-07";
+    const result = await importFitFile(
+      db(),
+      userA,
+      buildRunFit({ start: `${date}T06:30:00Z`, durationSec: 1200, speedMps: 2.9, hr: 148 }),
+      "steady.fit",
+    );
+    const detail = await getActivityDetail(db(), USER_A, result.activityId);
+    const m = detail?.metrics.find((x) => x.key === "pace_at_hr");
+    expect(m).toBeDefined();
+    expect(m?.label).toBe("Allure à FC (zone 2)");
+    expect(m?.unit).toBe("s/km");
+    expect(m?.value).toBe(Math.round(1000 / 2.9)); // constant speed → the band's pace is the pace
+    expect(m?.algorithmVersion).toBe("pace_at_hr_v1");
+    expect(m?.estimated).toBe(true);
+    expect(m?.detail).toContain("145–152 bpm"); // Z2 of LTHR 170 = 85–89 %
+    const [row] = await db()
+      .select()
+      .from(schema.computedMetrics)
+      .where(
+        and(
+          eq(schema.computedMetrics.userId, USER_A),
+          eq(schema.computedMetrics.metric, "pace_at_hr"),
+          eq(schema.computedMetrics.scopeId, result.activityId),
+        ),
+      );
+    expect(row?.inputs).toMatchObject({ zone: 2, hrMin: 145, hrMax: 152 });
+    expect(row?.superseded).toBe(false);
+  });
+
   it("detects running PRs (5 km) and supersedes the previous record", async () => {
     const first = await importFitFile(
       db(),
@@ -420,7 +544,8 @@ describe("importFitFile", () => {
       buildRunFit({ start: "2026-10-03T07:00:00Z", durationSec: 1560, speedMps: 5200 / 1560 }),
       "5k.fit",
     );
-    expect(first.prs).toEqual(["Nouveau record 5 km : 25:00"]);
+    // 5.2 km > 1 % over the distance: the time is pro-rated, announced as an estimate (spec §70).
+    expect(first.prs).toEqual(["≈ Record estimé sur 5 km : 25:00 (au prorata de 5,2 km)"]);
 
     const slower = await importFitFile(
       db(),
@@ -436,7 +561,7 @@ describe("importFitFile", () => {
       buildRunFit({ start: "2026-10-05T07:00:00Z", durationSec: 1479, speedMps: 5100 / 1479 }),
       "5k-fast.fit",
     );
-    expect(faster.prs).toEqual(["Nouveau record 5 km : 24:10"]);
+    expect(faster.prs).toEqual(["≈ Record estimé sur 5 km : 24:10 (au prorata de 5,1 km)"]);
 
     const prs = await db()
       .select()
@@ -459,6 +584,22 @@ describe("importFitFile", () => {
     const previous = prs.find((p) => p.value === 1500);
     expect(previous?.superseded).toBe(true);
     expect(previous?.activityId).toBe(first.activityId);
+    expect(current[0]?.algorithmVersion).toBe("run_pr_prorata_v1");
+
+    // Exactly 5 km: a real record, announced without "≈".
+    const exact = await importFitFile(
+      db(),
+      userA,
+      buildRunFit({ start: "2026-10-06T07:00:00Z", durationSec: 1440, speedMps: 5000 / 1440 }),
+      "5k-exact.fit",
+    );
+    expect(exact.prs).toEqual(["Nouveau record 5 km : 24:00"]);
+    const [exactRow] = await db()
+      .select()
+      .from(schema.personalRecords)
+      .where(eq(schema.personalRecords.activityId, exact.activityId));
+    expect(exactRow?.estimated).toBe(false);
+    expect(exactRow?.source).toBe("DEVICE");
   });
 
   it("rejects bytes that are not a FIT file with the parser's own message", async () => {
@@ -508,7 +649,8 @@ describe("syncGarminActivities", () => {
 
     const items = await listActivities(db(), USER_B);
     expect(items).toHaveLength(4);
-    expect(items.every((i) => i.provider === "garmin")).toBe(true);
+    // Simulated data is always recognisable: never stored as plain `garmin` (spec §14, §70).
+    expect(items.every((i) => i.provider === "garmin_mock")).toBe(true);
     expect(items.every((i) => i.workoutId !== null)).toBe(true);
     const bike = items.find((i) => i.modality === "bike");
     expect(bike?.title).toMatch(/^Vélo — \d+ min$/);
@@ -519,8 +661,34 @@ describe("syncGarminActivities", () => {
       .from(schema.rawPayloads)
       .where(eq(schema.rawPayloads.userId, USER_B));
     expect(raws).toHaveLength(4);
+    expect(raws.every((r) => r.provider === "garmin_mock")).toBe(true);
     expect(raws.every((r) => r.dedupeKey.startsWith("garmin:activity:"))).toBe(true);
     expect(raws.every((r) => r.parserVersion === GARMIN_IMPORT_VERSION)).toBe(true);
+
+    // Records and tests derived from the mock never claim a measured GARMIN source.
+    const prs = await db()
+      .select({ source: schema.personalRecords.source })
+      .from(schema.personalRecords)
+      .where(eq(schema.personalRecords.userId, USER_B));
+    expect(prs.every((p) => p.source === "MOCK")).toBe(true);
+  });
+
+  it("stores no realised intensity for an unmatched activity when no zone was resolved", async () => {
+    // User B has no LTHR and no zone set: nothing was calculated, so nothing is claimed (spec §70).
+    const ws = await db()
+      .select({
+        realisedIntensity: schema.workouts.realisedIntensity,
+        intensitySource: schema.workouts.intensitySource,
+        source: schema.workouts.source,
+        status: schema.workouts.status,
+      })
+      .from(schema.workouts)
+      .where(eq(schema.workouts.userId, USER_B));
+    expect(ws).toHaveLength(4);
+    expect(ws.every((w) => w.status === "done")).toBe(true);
+    expect(ws.every((w) => w.realisedIntensity === null)).toBe(true);
+    expect(ws.every((w) => w.intensitySource === "CALCULATED")).toBe(true);
+    expect(ws.every((w) => w.source === "garmin")).toBe(true); // `workout_source` enum: no mock value
   });
 
   it("computes aerobic decoupling on the long run and running dynamics from HRM streams", async () => {

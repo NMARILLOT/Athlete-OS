@@ -3,7 +3,7 @@ import { Chip } from "@/components/ui/chip";
 import { Empty } from "@/components/ui/empty";
 import { formatDateShort, formatDurationSec, formatKm, formatPace } from "@/lib/format";
 import type { ActivityListItem } from "@/server/services/activity.service";
-import { MODALITY_EMOJI, describeComparableGroup } from "./labels";
+import { MODALITY_EMOJI, describeComparableGroup, isSimulatedProvider } from "./labels";
 
 /** Activities list (spec §29): measured values only, "—" when absent. */
 export function ActivityList({ items }: { items: ActivityListItem[] }) {
@@ -35,6 +35,11 @@ export function ActivityList({ items }: { items: ActivityListItem[] }) {
                   : ""}
               </p>
               <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {isSimulatedProvider(a.provider) ? (
+                  <Chip tone="warn" className="h-6 text-[11px]">
+                    simulé
+                  </Chip>
+                ) : null}
                 {a.comparableGroup ? (
                   <Chip tone="neutral" className="h-6 text-[11px]">
                     {describeComparableGroup(a.comparableGroup)}

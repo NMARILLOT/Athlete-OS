@@ -21,7 +21,7 @@ import {
 } from "@/domain/strength";
 import { getExercise } from "@/domain/exercises";
 import { isHeavyStrengthSession, sessionRpeLoad } from "@/domain/load";
-import { toConfidence, type Feeling } from "@/domain/core";
+import { FEELING_VALUES, toConfidence, type Feeling, type WorkoutStatus } from "@/domain/core";
 import type { IsoDate as IsoDateT } from "@/domain/core/dates";
 import { NotFoundError, ValidationError } from "@/server/errors";
 import { log } from "@/server/logging";
@@ -49,13 +49,31 @@ export interface StrengthBundleExercise {
   alternates: string[];
 }
 
+/** A set of *this* workout already on the server replica (to resume when IndexedDB is empty). */
+export interface StrengthBundleSet {
+  id: string;
+  workoutExerciseId: string;
+  setIndex: number;
+  reps: number;
+  weightKg: number;
+  quality: SetQuality | null;
+  rpe: number | null;
+  isWarmup: boolean;
+  completedAt: string;
+  clientUpdatedAt: string;
+}
+
 export interface StrengthBundle {
   workoutId: string;
   title: string;
   date: IsoDateT;
   templateId: string | null;
-  status: string;
+  status: WorkoutStatus;
+  /** Server-side start of the session (`workouts.start_at`), when it was started. */
+  startedAt: string | null;
   exercises: StrengthBundleExercise[];
+  /** Sets already synced for this workout (ARCHITECTURE §4.2: replica used only when IndexedDB is empty). */
+  sets: StrengthBundleSet[];
 }
 
 function incrementFor(
@@ -166,6 +184,15 @@ export async function getStrengthBundle(
     : [];
   const template = w.templateId ? STRENGTH_TEMPLATES.find((t) => t.id === w.templateId) : undefined;
   const declared = await declaredE1rms(db, userId, exerciseIds);
+  // Own sets of this workout: the client re-seeds from them only when its IndexedDB session is gone.
+  const ownSets =
+    w.status === "in_progress"
+      ? await db
+          .select()
+          .from(strengthSets)
+          .where(and(eq(strengthSets.workoutId, w.id), eq(strengthSets.userId, userId)))
+          .orderBy(strengthSets.completedAt)
+      : [];
   const exercises: StrengthBundleExercise[] = exRows.map((e) => {
     const sets = history.filter((s) => s.exerciseId === e.exerciseId);
     const lastDate = sets[0]?.date ?? null;
@@ -215,7 +242,22 @@ export async function getStrengthBundle(
     date: w.date,
     templateId: w.templateId,
     status: w.status,
+    startedAt: w.startAt ? w.startAt.toISOString() : null,
     exercises,
+    sets: ownSets
+      .filter((s) => s.reps != null && s.weightKg != null)
+      .map((s) => ({
+        id: s.id,
+        workoutExerciseId: s.workoutExerciseId,
+        setIndex: s.setIndex,
+        reps: s.reps as number,
+        weightKg: s.weightKg as number,
+        quality: s.quality,
+        rpe: s.rpe,
+        isWarmup: s.isWarmup,
+        completedAt: s.completedAt.toISOString(),
+        clientUpdatedAt: s.clientUpdatedAt.toISOString(),
+      })),
   };
 }
 
@@ -280,25 +322,99 @@ export async function createStrengthWorkoutFromTemplate(
 // Outbox events (POST /api/sync/strength)
 // ---------------------------------------------------------------------------
 
+const IsoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD attendu");
+const IsoInstant = z.string().refine((s) => !Number.isNaN(Date.parse(s)), "date-heure invalide");
+const Rpe = z.number().min(1).max(10);
+const SetQualityValue = z.enum(["easy", "perfect", "hard", "failed"]);
+
+const DEFAULT_PRESCRIPTION: StrengthPrescription = {
+  sets: 3,
+  repMin: 8,
+  repMax: 12,
+  targetRpeMin: 7,
+  targetRpeMax: 8.5,
+  intent: "hypertrophy",
+  loadSuggestionKg: null,
+  restSec: null,
+};
+
 const SetPayload = z.object({
   id: z.string().uuid(),
   workoutExerciseId: z.string().uuid(),
   exerciseId: z.string().nullable().optional(),
   setIndex: z.number().int().min(0),
-  reps: z.number().int().min(0),
-  weightKg: z.number().min(0),
-  quality: z.enum(["easy", "perfect", "hard", "failed"]).nullable().optional(),
-  rpe: z.number().min(1).max(10).nullable().optional(),
+  reps: z.number().int().min(0).max(500),
+  weightKg: z.number().min(0).max(1000),
+  quality: SetQualityValue.nullable().optional(),
+  rpe: Rpe.nullable().optional(),
   isWarmup: z.boolean().optional(),
-  completedAt: z.string(),
-  clientUpdatedAt: z.string(),
+  completedAt: IsoInstant,
+  clientUpdatedAt: IsoInstant,
   e1rmKg: z.number().nullable().optional(),
 });
 
-export const OutboxEventSchema = z.object({
+/** Payload of each outbox event type: validated **before** the transaction so a bad event is dropped, not a 500. */
+const SessionStartedPayload = z.object({
+  date: IsoDay.optional(),
+  title: z.string().max(120).optional(),
+  templateId: z.string().uuid().nullable().optional().catch(null),
+  startedAt: IsoInstant.optional(),
+  exercises: z
+    .array(
+      z.object({
+        id: z.string().uuid(),
+        exerciseId: z.string().min(1).max(80),
+        order: z.number().int().min(0).max(99),
+        prescription: z.unknown().optional(),
+      }),
+    )
+    .max(30)
+    .optional(),
+});
+const SetCompletedPayload = z.object({ set: SetPayload });
+const SetUpdatedPayload = z.object({
+  setId: z.string().uuid(),
+  reps: z.number().int().min(0).max(500).optional(),
+  weightKg: z.number().min(0).max(1000).optional(),
+  rpe: Rpe.nullable().optional(),
+  quality: SetQualityValue.nullable().optional(),
+  clientUpdatedAt: IsoInstant.optional(),
+});
+const SetDeletedPayload = z.object({ setId: z.string().uuid() });
+const ExerciseAddedPayload = z.object({
+  id: z.string().uuid(),
+  exerciseId: z.string().min(1).max(80),
+  order: z.number().int().min(0).max(99).optional(),
+  prescription: z.unknown().optional(),
+});
+const ExerciseSwappedPayload = z.object({
+  workoutExerciseId: z.string().uuid(),
+  exerciseId: z.string().min(1).max(80),
+});
+const SessionFinishedPayload = z.object({
+  finishedAt: IsoInstant.optional(),
+  rpe: Rpe.nullable().optional(),
+  feeling: z.enum(FEELING_VALUES).nullable().optional(),
+  painReported: z.boolean().optional(),
+  notes: z.string().max(2000).optional(),
+  durationMin: z
+    .number()
+    .int()
+    .min(1)
+    .max(24 * 60)
+    .optional(),
+});
+
+const EventEnvelope = {
   id: z.string().uuid(),
   workoutId: z.string().uuid(),
   seq: z.number().int().min(0),
+  at: IsoInstant,
+};
+
+/** Envelope only (what the route accepts per element); the payload is checked per type by `StrengthEventSchema`. */
+export const OutboxEventSchema = z.object({
+  ...EventEnvelope,
   type: z.enum([
     "session_started",
     "set_completed",
@@ -309,13 +425,42 @@ export const OutboxEventSchema = z.object({
     "session_finished",
   ]),
   payload: z.record(z.string(), z.unknown()),
-  at: z.string(),
 });
 export type OutboxEventInput = z.infer<typeof OutboxEventSchema>;
 
+export const StrengthEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    ...EventEnvelope,
+    type: z.literal("session_started"),
+    payload: SessionStartedPayload,
+  }),
+  z.object({ ...EventEnvelope, type: z.literal("set_completed"), payload: SetCompletedPayload }),
+  z.object({ ...EventEnvelope, type: z.literal("set_updated"), payload: SetUpdatedPayload }),
+  z.object({ ...EventEnvelope, type: z.literal("set_deleted"), payload: SetDeletedPayload }),
+  z.object({ ...EventEnvelope, type: z.literal("exercise_added"), payload: ExerciseAddedPayload }),
+  z.object({
+    ...EventEnvelope,
+    type: z.literal("exercise_swapped"),
+    payload: ExerciseSwappedPayload,
+  }),
+  z.object({
+    ...EventEnvelope,
+    type: z.literal("session_finished"),
+    payload: SessionFinishedPayload,
+  }),
+]);
+export type StrengthEvent = z.infer<typeof StrengthEventSchema>;
+
+const CLOSED_STATUSES: ReadonlySet<WorkoutStatus> = new Set(["done", "skipped"]);
+
 /**
  * Apply a batch of client events in order, idempotently (client_events unique id), scoped to the
- * user's own workout. Returns acknowledged event ids (including already-applied ones).
+ * user's own workout. Returns acknowledged event ids (including already-applied, dropped-as-orphan
+ * and dropped-as-invalid ones, so a poison event can never block the outbox).
+ *
+ * Invariants (ARCHITECTURE §4.2): the client is authoritative only while the workout is
+ * `in_progress`; a `done`/`skipped` workout is never revived by `session_started` nor overwritten
+ * by a stray second `session_finished`.
  */
 export async function applyStrengthEvents(
   db: Db,
@@ -325,16 +470,28 @@ export async function applyStrengthEvents(
   const acknowledged: string[] = [];
   const finished: string[] = [];
   const sorted = [...events].sort((a, b) => a.seq - b.seq);
-  for (const ev of sorted) {
+  for (const raw of sorted) {
     const [already] = await db
       .select({ id: clientEvents.id })
       .from(clientEvents)
-      .where(eq(clientEvents.id, ev.id))
+      .where(and(eq(clientEvents.id, raw.id), eq(clientEvents.userId, userId)))
       .limit(1);
     if (already) {
-      acknowledged.push(ev.id);
+      acknowledged.push(raw.id);
       continue;
     }
+    const parsed = StrengthEventSchema.safeParse(raw);
+    if (!parsed.success) {
+      log.warn("sync.strength.invalid_payload", {
+        userId,
+        workoutId: raw.workoutId,
+        kind: raw.type,
+        count: parsed.error.issues.length,
+      });
+      acknowledged.push(raw.id); // dropped: never let one malformed event block the outbox
+      continue;
+    }
+    const ev = parsed.data;
     const [w] = await db
       .select()
       .from(workouts)
@@ -345,23 +502,23 @@ export async function applyStrengthEvents(
       acknowledged.push(ev.id); // drop orphan events rather than blocking the outbox forever
       continue;
     }
+    if (w && CLOSED_STATUSES.has(w.status) && ev.type === "session_finished") {
+      // A stray second finish (re-seeded shell, replayed batch) must never overwrite the declared outcome.
+      log.warn("sync.strength.finish_on_closed_workout", {
+        userId,
+        workoutId: w.id,
+        kind: ev.type,
+        status: w.status,
+      });
+      acknowledged.push(ev.id);
+      continue;
+    }
     await db.transaction(async (tx) => {
       switch (ev.type) {
         case "session_started": {
-          const p = ev.payload as {
-            date?: string;
-            title?: string;
-            templateId?: string | null;
-            startedAt?: string;
-            exercises?: Array<{
-              id: string;
-              exerciseId: string;
-              order: number;
-              prescription: unknown;
-            }>;
-          };
+          const p = ev.payload;
           if (!w) {
-            await tx
+            const inserted = await tx
               .insert(workouts)
               .values({
                 id: ev.workoutId,
@@ -376,8 +533,19 @@ export async function applyStrengthEvents(
                 startAt: p.startedAt ? new Date(p.startedAt) : new Date(ev.at),
                 templateId: p.templateId ?? null,
               })
-              .onConflictDoNothing();
+              .onConflictDoNothing()
+              .returning({ id: workouts.id });
+            if (inserted.length === 0) {
+              // The id already exists under another user: write nothing (no exercises, no event row).
+              log.warn("sync.strength.unknown_workout", {
+                userId,
+                workoutId: ev.workoutId,
+                kind: ev.type,
+              });
+              return;
+            }
             for (const ex of p.exercises ?? []) {
+              if (!getExercise(ex.exerciseId)) continue;
               const pr = StrengthPrescriptionSchema.safeParse(ex.prescription);
               await tx
                 .insert(workoutExercises)
@@ -388,34 +556,30 @@ export async function applyStrengthEvents(
                   date: p.date ?? ev.at.slice(0, 10),
                   order: ex.order,
                   exerciseId: ex.exerciseId,
-                  prescription: pr.success
-                    ? pr.data
-                    : {
-                        sets: 3,
-                        repMin: 8,
-                        repMax: 12,
-                        targetRpeMin: 7,
-                        targetRpeMax: 8.5,
-                        intent: "hypertrophy",
-                        loadSuggestionKg: null,
-                        restSec: null,
-                      },
+                  prescription: pr.success ? pr.data : DEFAULT_PRESCRIPTION,
                   source: "USER",
                 })
                 .onConflictDoNothing();
             }
+          } else if (CLOSED_STATUSES.has(w.status)) {
+            // Never revive a finished/skipped workout (its load would vanish from the engine history).
+            log.warn("sync.strength.start_on_closed_workout", {
+              userId,
+              workoutId: w.id,
+              kind: ev.type,
+              status: w.status,
+            });
           } else {
             await tx
               .update(workouts)
               .set({ status: "in_progress", startAt: w.startAt ?? new Date(p.startedAt ?? ev.at) })
-              .where(eq(workouts.id, w.id));
+              .where(and(eq(workouts.id, w.id), eq(workouts.userId, userId)));
           }
           break;
         }
         case "set_completed": {
-          const parsed = SetPayload.safeParse(ev.payload.set);
-          if (!parsed.success || !w) break;
-          const s = parsed.data;
+          if (!w) break;
+          const s = ev.payload.set;
           const [wx] = await tx
             .select({ id: workoutExercises.id, exerciseId: workoutExercises.exerciseId })
             .from(workoutExercises)
@@ -451,6 +615,8 @@ export async function applyStrengthEvents(
             })
             .onConflictDoUpdate({
               target: strengthSets.id,
+              // A client-supplied id colliding with another user's (or another workout's) row updates nothing.
+              setWhere: and(eq(strengthSets.userId, userId), eq(strengthSets.workoutId, w.id)),
               set: {
                 reps: s.reps,
                 weightKg: s.weightKg,
@@ -464,19 +630,18 @@ export async function applyStrengthEvents(
           break;
         }
         case "set_updated": {
-          const p = ev.payload as {
-            setId?: string;
-            reps?: number;
-            weightKg?: number;
-            rpe?: number | null;
-            quality?: SetQuality | null;
-            clientUpdatedAt?: string;
-          };
-          if (!p.setId || !w) break;
+          if (!w) break;
+          const p = ev.payload;
           const [existing] = await tx
             .select()
             .from(strengthSets)
-            .where(and(eq(strengthSets.id, p.setId), eq(strengthSets.userId, userId)))
+            .where(
+              and(
+                eq(strengthSets.id, p.setId),
+                eq(strengthSets.userId, userId),
+                eq(strengthSets.workoutId, w.id),
+              ),
+            )
             .limit(1);
           if (!existing) break;
           const incoming = p.clientUpdatedAt ? new Date(p.clientUpdatedAt) : new Date(ev.at);
@@ -497,20 +662,26 @@ export async function applyStrengthEvents(
               clientUpdatedAt: incoming,
               e1rmKg: e1rm,
             })
-            .where(eq(strengthSets.id, existing.id));
+            .where(and(eq(strengthSets.id, existing.id), eq(strengthSets.userId, userId)));
           break;
         }
         case "set_deleted": {
-          const p = ev.payload as { setId?: string };
-          if (p.setId)
-            await tx
-              .delete(strengthSets)
-              .where(and(eq(strengthSets.id, p.setId), eq(strengthSets.userId, userId)));
+          if (!w) break;
+          await tx
+            .delete(strengthSets)
+            .where(
+              and(
+                eq(strengthSets.id, ev.payload.setId),
+                eq(strengthSets.userId, userId),
+                eq(strengthSets.workoutId, w.id),
+              ),
+            );
           break;
         }
         case "exercise_swapped": {
-          const p = ev.payload as { workoutExerciseId?: string; exerciseId?: string };
-          if (p.workoutExerciseId && p.exerciseId && getExercise(p.exerciseId))
+          if (!w) break;
+          const p = ev.payload;
+          if (getExercise(p.exerciseId))
             await tx
               .update(workoutExercises)
               .set({ exerciseId: p.exerciseId })
@@ -518,18 +689,15 @@ export async function applyStrengthEvents(
                 and(
                   eq(workoutExercises.id, p.workoutExerciseId),
                   eq(workoutExercises.userId, userId),
+                  eq(workoutExercises.workoutId, w.id),
                 ),
               );
           break;
         }
         case "exercise_added": {
-          const p = ev.payload as {
-            id?: string;
-            exerciseId?: string;
-            order?: number;
-            prescription?: unknown;
-          };
-          if (!w || !p.id || !p.exerciseId || !getExercise(p.exerciseId)) break;
+          if (!w) break;
+          const p = ev.payload;
+          if (!getExercise(p.exerciseId)) break;
           const pr = StrengthPrescriptionSchema.safeParse(p.prescription);
           await tx
             .insert(workoutExercises)
@@ -540,18 +708,7 @@ export async function applyStrengthEvents(
               date: w.date,
               order: p.order ?? 99,
               exerciseId: p.exerciseId,
-              prescription: pr.success
-                ? pr.data
-                : {
-                    sets: 3,
-                    repMin: 8,
-                    repMax: 12,
-                    targetRpeMin: 7,
-                    targetRpeMax: 8.5,
-                    intent: "hypertrophy",
-                    loadSuggestionKg: null,
-                    restSec: null,
-                  },
+              prescription: pr.success ? pr.data : DEFAULT_PRESCRIPTION,
               source: "USER",
             })
             .onConflictDoNothing();
@@ -559,14 +716,7 @@ export async function applyStrengthEvents(
         }
         case "session_finished": {
           if (!w) break;
-          const p = ev.payload as {
-            finishedAt?: string;
-            rpe?: number | null;
-            feeling?: Feeling | null;
-            painReported?: boolean;
-            notes?: string;
-            durationMin?: number;
-          };
+          const p = ev.payload;
           const finishedAt = p.finishedAt ? new Date(p.finishedAt) : new Date(ev.at);
           const durationMin =
             p.durationMin ??
@@ -598,7 +748,8 @@ export async function applyStrengthEvents(
 }
 
 /** Finish: session-RPE load, actual analysis from performed sets, e1RM PRs. */
-async function finishStrengthWorkout(
+/** Finish a strength workout server-side (outbox `session_finished`, or the daily stale-session sweep). */
+export async function finishStrengthWorkout(
   db: Db,
   userId: string,
   opts: {
@@ -633,7 +784,7 @@ async function finishStrengthWorkout(
       realisedIntensity: heavy ? "moderate" : "easy",
       intensitySource: "CALCULATED",
     })
-    .where(eq(workouts.id, w.id));
+    .where(and(eq(workouts.id, w.id), eq(workouts.userId, userId)));
 
   // Actual analysis: planned profile scaled by performed volume (sets done / sets planned) and RPE.
   const [planned] = await db
@@ -644,7 +795,7 @@ async function finishStrengthWorkout(
   const exRows = await db
     .select()
     .from(workoutExercises)
-    .where(eq(workoutExercises.workoutId, w.id));
+    .where(and(eq(workoutExercises.workoutId, w.id), eq(workoutExercises.userId, userId)));
   const plannedSets =
     exRows.reduce(
       (a, e) => a + (StrengthPrescriptionSchema.safeParse(e.prescription).data?.sets ?? 3),
@@ -708,11 +859,14 @@ async function finishStrengthWorkout(
       },
     });
 
-  // e1RM PR detection (estimated, version-pinned): compare best set e1RM to the best before this workout.
+  // e1RM PR detection (estimated, version-pinned): compare the best set e1RM to the best known
+  // before this workout — measured sets of other workouts AND the declared 1RM/e1RM records
+  // (onboarding "niveau / PR"), so a first session below the declared level is not celebrated (§58, §70).
   const byExercise = new Map<string, typeof sets>();
   for (const s of sets)
     if (!s.isWarmup && s.e1rmKg != null)
       byExercise.set(s.exerciseId, [...(byExercise.get(s.exerciseId) ?? []), s]);
+  const declared = await declaredE1rms(db, userId, [...byExercise.keys()]);
   for (const [exerciseId, list] of byExercise) {
     const best = list.reduce((m, s) => ((s.e1rmKg ?? 0) > (m.e1rmKg ?? 0) ? s : m));
     const [prev] = await db
@@ -726,7 +880,12 @@ async function finishStrengthWorkout(
           gte(strengthSets.completedAt, new Date(0)),
         ),
       );
-    const previous = prev?.best != null ? Number(prev.best) : null;
+    const measuredPrev = prev?.best != null ? Number(prev.best) : null;
+    const declaredPrev = declared[exerciseId] ?? null;
+    const previous =
+      measuredPrev === null && declaredPrev === null
+        ? null
+        : Math.max(measuredPrev ?? -Infinity, declaredPrev ?? -Infinity);
     if (best.e1rmKg != null && (previous === null || best.e1rmKg > previous)) {
       await db
         .insert(personalRecords)

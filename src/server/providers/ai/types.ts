@@ -21,6 +21,9 @@ export interface AiResult<T> {
   meta: AiInvocationMeta;
 }
 
+/** Identity of a call in `ai_invocations` (its unique index): identical inputs reuse the stored valid output (ADR-022). */
+export type AiCallKey = Pick<AiInvocationMeta, "kind" | "model" | "promptVersion" | "inputHash">;
+
 export interface ExplainInput {
   rulesTriggered: Array<{ ruleId: string; message: string }>;
   primaryTitle: string;
@@ -46,6 +49,10 @@ export interface AiProvider {
   }): Promise<AiResult<UserIntent>>;
   /** Display-only wording for the "POURQUOI ?" screen; the templated explanation is always the fallback. */
   explain(input: ExplainInput): Promise<AiResult<{ text: string }>>;
+  /** The key `parseWod` would record for this input, so the caller can reuse a stored output before spending. */
+  parseWodKey(input: { text: string; imageBase64?: string }): AiCallKey;
+  /** The key `parseIntent` would record (day-scoped: the output's date is relative to `today`). */
+  parseIntentKey(input: { text: string; today: string }): AiCallKey;
 }
 
 /** Deterministic content hash for idempotent invocations (ai_invocations unique key). */

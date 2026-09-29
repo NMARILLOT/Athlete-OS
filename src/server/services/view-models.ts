@@ -5,6 +5,7 @@
 import type { Recommendation } from "@/domain/engine";
 import type { WodAnalysis, NormalizedWod } from "@/domain/wod";
 import type { IntensityBand, WorkoutStatus, WorkoutType } from "@/domain/core";
+import type { PendingReschedule } from "./recommendation.service";
 
 export interface WorkoutCard {
   id: string;
@@ -45,6 +46,8 @@ export interface TodayView {
   /** In-progress strength workout (from the server replica) so Today can offer "Reprendre". */
   inProgressWorkoutId: string | null;
   inProgressWorkoutType: "strength" | "cardio" | null;
+  /** Engine reschedules still applicable to the athlete's own planned sessions (spec §32/§53). */
+  reschedules: PendingReschedule[];
   insight: string | null;
   onboardingDone: boolean;
 }

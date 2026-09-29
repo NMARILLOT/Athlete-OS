@@ -34,7 +34,7 @@ import type {
 import { deriveWeeklyTargets } from "@/domain/stimulus";
 import { crossfitClassPrior } from "@/domain/engine";
 import { sessionRpeLoad } from "@/domain/load";
-import { localIso, localMinute } from "@/server/time";
+import { localDate, localIso, localMinute } from "@/server/time";
 
 export const DEFAULT_GOALS: GoalWeights = {
   health_longevity: 1,
@@ -97,6 +97,8 @@ export async function assembleEngineInput(
     ? Object.fromEntries(goalRows.map((g) => [g.key, g.weight]))
     : { ...DEFAULT_GOALS };
 
+  // Active blocks, newest first (same order as profile.service `activeBlocks`). A recovery block
+  // (deload) and a focus block coexist: the deload always wins, the focus block only shapes targets.
   const blockRows = await db
     .select()
     .from(trainingBlocks)
@@ -108,10 +110,10 @@ export async function assembleEngineInput(
         sql`${trainingBlocks.endedBy} is null`,
       ),
     )
-    .orderBy(desc(trainingBlocks.startsOn))
-    .limit(1);
-  const block = blockRows[0] ?? null;
-  const deloadActive = block?.focus === "recovery";
+    .orderBy(desc(trainingBlocks.startsOn), desc(trainingBlocks.createdAt));
+  const deloadBlock = blockRows.find((b) => b.focus === "recovery") ?? null;
+  const block = blockRows.find((b) => b.focus !== "recovery") ?? null;
+  const deloadActive = deloadBlock !== null;
 
   const weekStart = isoWeekStart(today);
   const targetRows = await db
@@ -165,60 +167,59 @@ export async function assembleEngineInput(
   const history: HistorySession[] = [];
   for (const { w, a } of doneRows) {
     const analysis = a ?? plannedById.get(w.id) ?? null;
-    const profileLoad: LoadProfile = analysis
-      ? {
-          expectedCredits: analysis.stimulusCredits,
-          loadVector: analysis.loadVector,
-          intensity: analysis.intensity,
-          heavyStrength: analysis.heavyStrength,
-          durationMin: w.actualDurationMin ?? w.plannedDurationMin ?? 45,
-          modality: modalityOfType(w.type),
-          patterns: analysis.patternExposure,
-          impactUnits: analysis.impactUnits,
-        }
-      : w.type === "crossfit"
-        ? { ...crossfitClassPrior(), durationMin: w.actualDurationMin ?? 60 }
-        : {
-            expectedCredits: {},
-            loadVector: {
-              cardiovascular: 1,
-              muscular_lower: 1,
-              muscular_upper: 1,
-              impact: 0,
-              eccentric: 0,
-              technical: 0,
-            },
-            intensity: w.realisedIntensity ?? w.plannedIntensity ?? "easy",
-            heavyStrength: false,
-            durationMin: w.actualDurationMin ?? w.plannedDurationMin ?? 30,
-            modality: modalityOfType(w.type),
-            patterns: {},
-            impactUnits: 0,
-          };
+    const profileLoad: LoadProfile =
+      w.type === "rest"
+        ? restLoadProfile(analysis?.stimulusCredits ?? {})
+        : analysis
+          ? {
+              expectedCredits: analysis.stimulusCredits,
+              loadVector: analysis.loadVector,
+              intensity: analysis.intensity,
+              heavyStrength: analysis.heavyStrength,
+              durationMin: w.actualDurationMin ?? w.plannedDurationMin ?? 45,
+              modality: modalityOfType(w.type),
+              patterns: analysis.patternExposure,
+              impactUnits: analysis.impactUnits,
+            }
+          : w.type === "crossfit"
+            ? { ...crossfitClassPrior(), durationMin: w.actualDurationMin ?? 60 }
+            : {
+                expectedCredits: {},
+                loadVector: {
+                  cardiovascular: 1,
+                  muscular_lower: 1,
+                  muscular_upper: 1,
+                  impact: 0,
+                  eccentric: 0,
+                  technical: 0,
+                },
+                intensity: w.realisedIntensity ?? w.plannedIntensity ?? "easy",
+                heavyStrength: false,
+                durationMin: w.actualDurationMin ?? w.plannedDurationMin ?? 30,
+                modality: modalityOfType(w.type),
+                patterns: {},
+                impactUnits: 0,
+              };
     const durationMin = profileLoad.durationMin;
-    const endMs = (
-      w.finishedAt ??
-      (w.startAt
-        ? new Date(w.startAt.getTime() + durationMin * 60000)
-        : new Date(`${w.date}T17:00:00Z`))
-    ).getTime();
     history.push({
       id: w.id,
       date: w.date,
-      endTime: new Date(endMs).toISOString(),
+      endTime: sessionEndTime(w, durationMin, opts.timezone).toISOString(),
       type: w.type,
       kind: kindOf(w),
       family: familyOf(w),
       rpe: w.rpe,
       funScore: null,
       sessionRpeLoad: w.sessionRpeLoad ?? sessionRpeLoad(durationMin, w.rpe),
-      estimated: !a,
+      // A rest day has nothing to estimate: its zero load is exact by definition.
+      estimated: w.type === "rest" ? false : !a,
       ...profileLoad,
-      intensity: w.realisedIntensity ?? profileLoad.intensity,
+      intensity: w.type === "rest" ? "easy" : (w.realisedIntensity ?? profileLoad.intensity),
     });
   }
 
-  // Planned: today..+7 (planned or in_progress), with WOD status for fixed classes.
+  // Planned: today..+7 (planned, in_progress or auto_adjusted — a moved session is still planned),
+  // with WOD status for fixed classes.
   const plannedRows = await db
     .select({ w: workouts, a: workoutAnalyses, cf: crossfitWorkouts })
     .from(workouts)
@@ -230,7 +231,7 @@ export async function assembleEngineInput(
     .where(
       and(
         eq(workouts.userId, userId),
-        inArray(workouts.status, ["planned", "in_progress"]),
+        inArray(workouts.status, [...ENGINE_PLANNED_STATUSES]),
         gte(workouts.date, today),
         lte(workouts.date, to),
       ),
@@ -333,6 +334,8 @@ export async function assembleEngineInput(
     reportedAt: p.reportedAt.toISOString(),
   }));
 
+  // Single-day intents (ends_on null) apply only when declared for today; ranged intents apply
+  // while starts_on ≤ today ≤ ends_on. Yesterday's "repos" must never steer today.
   const intentRows = await db
     .select()
     .from(userIntents)
@@ -341,12 +344,12 @@ export async function assembleEngineInput(
         eq(userIntents.userId, userId),
         eq(userIntents.status, "active"),
         lte(userIntents.startsOn, today),
-        sql`(${userIntents.endsOn} is null or ${userIntents.endsOn} >= ${today})`,
+        sql`((${userIntents.endsOn} is null and ${userIntents.startsOn} = ${today}) or ${userIntents.endsOn} >= ${today})`,
       ),
     )
     .orderBy(desc(userIntents.declaredAt));
   const intents: UserIntent[] = intentRows
-    .filter((i) => i.endsOn == null || i.startsOn === today)
+    .filter((i) => i.endsOn != null || i.startsOn === today)
     .map((i) => ({
       kind: i.kind,
       intensity: i.params.intensity ?? undefined,
@@ -439,10 +442,13 @@ export async function assembleEngineInput(
     intents,
     availability,
     athleteModel: buildAthleteModel(learned, { meanWeeklyImpactIU, meanDailyLoadAU }),
-    deload:
-      deloadActive && block
-        ? { active: true, reason: block.reason ?? undefined, until: block.endsOn ?? undefined }
-        : null,
+    deload: deloadBlock
+      ? {
+          active: true,
+          reason: deloadBlock.reason ?? undefined,
+          until: deloadBlock.endsOn ?? undefined,
+        }
+      : null,
     events: eventRows.map((e) => ({
       kind: e.kind,
       date: e.date,
@@ -465,6 +471,48 @@ function bandFromDeclared(
   if (signals >= 2) return "poor";
   if (signals === 0 && energy >= 2 && soreness <= 1) return "good";
   return "ok";
+}
+
+/** Statuses the engine treats as "still planned" (a user move sets `auto_adjusted`, spec §53). */
+export const ENGINE_PLANNED_STATUSES = ["planned", "in_progress", "auto_adjusted"] as const;
+
+/** Rest is the absence of load: zero vector, no credits except the recovery credit an engine rest option may carry. */
+function restLoadProfile(credits: LoadProfile["expectedCredits"]): LoadProfile {
+  const kept: LoadProfile["expectedCredits"] = {};
+  if (credits.mobility_recovery) kept.mobility_recovery = credits.mobility_recovery;
+  return {
+    expectedCredits: kept,
+    loadVector: {
+      cardiovascular: 0,
+      muscular_lower: 0,
+      muscular_upper: 0,
+      impact: 0,
+      eccentric: 0,
+      technical: 0,
+    },
+    intensity: "easy",
+    heavyStrength: false,
+    durationMin: 0,
+    modality: "other",
+    patterns: {},
+    impactUnits: 0,
+  };
+}
+
+/**
+ * Instant a done session ended, for residual-fatigue decay. `finished_at` is trusted only when it
+ * falls on the session's own local day: late feedback or a back-dated log stamped with the feedback
+ * time would otherwise make an old session look freshly finished. Fallback: start + duration, else
+ * 17:00 UTC on the session's date (documented convention, ENGINE.md).
+ */
+function sessionEndTime(
+  w: { date: IsoDate; startAt: Date | null; finishedAt: Date | null },
+  durationMin: number,
+  timezone: string,
+): Date {
+  if (w.finishedAt && localDate(w.finishedAt, timezone) <= w.date) return w.finishedAt;
+  if (w.startAt) return new Date(w.startAt.getTime() + durationMin * 60000);
+  return new Date(`${w.date}T17:00:00Z`);
 }
 
 export function modalityOfType(type: string): LoadProfile["modality"] {

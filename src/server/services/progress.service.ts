@@ -33,6 +33,30 @@ import type { ProgressView } from "./view-models";
  * shows "—" or an empty state — never a made-up value.
  */
 
+/** One pace @ HR point; `basis` says what the pace actually is (spec §17, §70). */
+export interface PaceAtHrPoint {
+  date: string;
+  paceSecKm: number;
+  /** "140–149": the 10-bpm bucket of the average HR, or the exact band of the steady-state estimate. */
+  hrBand: string;
+  /**
+   * `pace_at_hr`: the versioned computed metric (pace of the steady samples inside the Z2 band);
+   * `activity_average`: whole-activity average pace at the whole-activity average HR.
+   */
+  basis: "pace_at_hr" | "activity_average";
+}
+
+/** One series per comparable group (spec §30): groups are never merged into one trend. */
+export interface PaceAtHrSeries {
+  comparableGroup: string;
+  points: PaceAtHrPoint[];
+}
+
+/** `ProgressView` with the pace @ HR trend split per comparable group. */
+export type ProgressPageView = Omit<ProgressView, "engine"> & {
+  engine: Omit<ProgressView["engine"], "paceAtHr"> & { paceAtHr: PaceAtHrSeries[] };
+};
+
 export const PROGRESS_RANGE_VALUES = ["7d", "4w", "3m", "6m", "1y", "all"] as const;
 export type ProgressRange = (typeof PROGRESS_RANGE_VALUES)[number];
 
@@ -128,7 +152,11 @@ function loadOf(w: DoneWorkoutRow): number | null {
 /** Every ISO week Monday between two dates (inclusive), so charts have a bar per week. */
 function weekStartsBetween(from: IsoDate, to: IsoDate): IsoDate[] {
   const out: IsoDate[] = [];
-  for (let w = isoWeekStart(from); w <= to; w = addDays(w, 7)) out.push(w);
+  let w = isoWeekStart(from);
+  while (w <= to) {
+    out.push(w);
+    w = addDays(w, 7);
+  }
   return out;
 }
 
@@ -201,7 +229,7 @@ export async function getProgressView(
   range: ProgressRange,
   today: IsoDate,
   opts: { timezone?: string } = {},
-): Promise<ProgressView> {
+): Promise<ProgressPageView> {
   const timezone = opts.timezone ?? "UTC";
   const earliest = range === "all" ? await earliestDataDate(db, userId, today) : today;
   const { from, to } = rangeBounds(range, today, earliest);
@@ -316,19 +344,19 @@ export async function getProgressView(
         .map(([date, e1rmKg]) => ({ date, e1rmKg })),
     }));
 
-  // Engine: pace @ HR on comparable easy runs (measured), threshold pace (estimated), tests.
+  // Engine: pace @ HR on easy runs, one series per comparable group (spec §30 — a 45-min flat run
+  // and a 2-h hilly long run are never plotted as one trend). The versioned `pace_at_hr` metric
+  // (steady samples inside Z2) is preferred; otherwise the whole-activity average pace at the
+  // average HR, and the point says which (`basis`). Activities without a group are not "comparable".
   const activityRows = await db
     .select({
+      id: activities.id,
       localDate: activities.localDate,
-      sport: activities.sport,
       avgHr: activities.avgHr,
       avgPaceSecKm: activities.avgPaceSecKm,
       comparableGroup: activities.comparableGroup,
-      plannedIntensity: workouts.plannedIntensity,
-      realisedIntensity: workouts.realisedIntensity,
     })
     .from(activities)
-    .leftJoin(workouts, and(eq(workouts.id, activities.workoutId), eq(workouts.userId, userId)))
     .where(
       and(
         eq(activities.userId, userId),
@@ -336,24 +364,64 @@ export async function getProgressView(
         lte(activities.localDate, to),
         sql`${activities.avgHr} is not null`,
         sql`${activities.avgPaceSecKm} is not null`,
+        sql`${activities.comparableGroup} like 'easy_run%'`,
       ),
     )
     .orderBy(asc(activities.localDate), asc(activities.startAt));
-  const paceAtHr: ProgressView["engine"]["paceAtHr"] = [];
+  const paceMetricRows = activityRows.length
+    ? await db
+        .select({
+          scopeId: computedMetrics.scopeId,
+          value: computedMetrics.value,
+          inputs: computedMetrics.inputs,
+        })
+        .from(computedMetrics)
+        .where(
+          and(
+            eq(computedMetrics.userId, userId),
+            eq(computedMetrics.metric, "pace_at_hr"),
+            eq(computedMetrics.scope, "activity"),
+            eq(computedMetrics.superseded, false),
+            inArray(
+              computedMetrics.scopeId,
+              activityRows.map((a) => a.id),
+            ),
+          ),
+        )
+    : [];
+  const paceMetricByActivity = new Map(
+    paceMetricRows.flatMap((r) => (r.scopeId ? [[r.scopeId, r] as const] : [])),
+  );
+  const pointsByGroup = new Map<string, PaceAtHrPoint[]>();
   for (const a of activityRows) {
-    if (a.avgHr == null || a.avgPaceSecKm == null || a.avgPaceSecKm <= 0) continue;
-    const easyRun =
-      a.comparableGroup?.startsWith("easy_run") ||
-      (a.comparableGroup == null &&
-        a.sport === "running" &&
-        (a.realisedIntensity ?? a.plannedIntensity) === "easy");
-    if (!easyRun) continue;
-    paceAtHr.push({
-      date: a.localDate,
-      paceSecKm: Math.round(a.avgPaceSecKm),
-      hrBand: hrBandOf(a.avgHr),
-    });
+    if (!a.comparableGroup || a.avgHr == null) continue;
+    const metric = paceMetricByActivity.get(a.id);
+    let point: PaceAtHrPoint | null = null;
+    if (metric && Number.isFinite(metric.value) && metric.value > 0) {
+      const lo = metric.inputs.hrMin;
+      const hi = metric.inputs.hrMax;
+      point = {
+        date: a.localDate,
+        paceSecKm: Math.round(metric.value),
+        hrBand:
+          typeof lo === "number" && typeof hi === "number" ? `${lo}–${hi}` : hrBandOf(a.avgHr),
+        basis: "pace_at_hr",
+      };
+    } else if (a.avgPaceSecKm != null && a.avgPaceSecKm > 0) {
+      point = {
+        date: a.localDate,
+        paceSecKm: Math.round(a.avgPaceSecKm),
+        hrBand: hrBandOf(a.avgHr),
+        basis: "activity_average",
+      };
+    }
+    if (!point) continue;
+    pointsByGroup.set(a.comparableGroup, [...(pointsByGroup.get(a.comparableGroup) ?? []), point]);
   }
+  // Most populated group first (the athlete's usual outing), then alphabetical for stability.
+  const paceAtHr: PaceAtHrSeries[] = [...pointsByGroup.entries()]
+    .sort(([ga, pa], [gb, pb]) => pb.length - pa.length || (ga < gb ? -1 : 1))
+    .map(([comparableGroup, points]) => ({ comparableGroup, points }));
 
   const thresholdRows = await db
     .select({ date: computedMetrics.date, value: computedMetrics.value })

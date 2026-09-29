@@ -33,9 +33,15 @@ export const MODALITY_EMOJI: Record<Modality, string> = {
 
 export const PROVIDER_FR: Record<string, string> = {
   garmin: "Garmin",
+  garmin_mock: "Garmin simulé",
   fit_import: "Fichier FIT",
   manual: "Manuel",
 };
+
+/** Rows produced by the development mock: simulated, never "mesuré par l'appareil" (spec §14, §70). */
+export function isSimulatedProvider(provider: string): boolean {
+  return provider === "garmin_mock";
+}
 
 const INTENSITY_FR: Record<string, string> = { easy: "facile", moderate: "modérée", hard: "dure" };
 const MODALITY_TOKEN_FR: Record<string, string> = {

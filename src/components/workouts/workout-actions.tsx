@@ -129,18 +129,18 @@ export function WorkoutActions(w: WorkoutActionsProps) {
         <p className="text-sm text-fg-muted">Séance sautée. Le moteur a replanifié sans elle.</p>
       ) : null}
 
-      {w.status === "in_progress" && w.type === "strength" ? (
+      {w.status === "in_progress" && (w.type === "strength" || w.type === "cardio") ? (
         <Link
-          href={`/train/strength/${w.id}`}
+          href={w.type === "cardio" ? `/train/cardio/${w.id}` : `/train/strength/${w.id}`}
           className="flex h-14 items-center justify-center rounded-2xl bg-accent text-lg font-semibold text-accent-fg"
         >
           Reprendre la séance
         </Link>
       ) : null}
 
-      {open ? (
+      {open || w.status === "in_progress" ? (
         <div className="flex flex-col gap-2">
-          {w.type === "strength" ? (
+          {!open ? null : w.type === "strength" ? (
             <Link
               href={`/train/strength/${w.id}`}
               className="flex h-14 items-center justify-center rounded-2xl bg-accent text-lg font-semibold text-accent-fg"

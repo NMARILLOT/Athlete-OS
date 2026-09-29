@@ -2,7 +2,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@/db/client";
-import { aiInvocations, wodInboxItems } from "@/db/schema";
+import { wodInboxItems } from "@/db/schema";
 import type { IsoDate } from "@/domain/core/dates";
 import {
   analyzeWod,
@@ -13,7 +13,7 @@ import {
 } from "@/domain/wod";
 import { NotFoundError, ValidationError } from "@/server/errors";
 import { log } from "@/server/logging";
-import { aiProvider, type AiInvocationMeta } from "@/server/providers/ai";
+import { parseWodGuarded } from "./ai-invocations.service";
 import { bestE1rmsByExercise } from "./strength-session.service";
 import { createCrossfitWorkoutFromWod } from "./workout.service";
 import type { InboxItemView } from "./view-models";
@@ -35,7 +35,11 @@ function toView(r: typeof wodInboxItems.$inferSelect): InboxItemView {
   };
 }
 
-/** Save the raw paste FIRST (never lose the text), dedupe open items by content hash. */
+/**
+ * Save the raw paste FIRST (never lose the text), dedupe open items by content hash. A re-paste of
+ * an open item with a new date / class time re-schedules that item (the partial unique index
+ * forbids a second open row with the same hash).
+ */
 export async function createInboxItem(
   db: Db,
   userId: string,
@@ -62,7 +66,18 @@ export async function createInboxItem(
       ),
     )
     .limit(1);
-  if (existing) return toView(existing);
+  if (existing) {
+    if (opts.scheduledFor == null && opts.startLocal == null) return toView(existing);
+    const [updated] = await db
+      .update(wodInboxItems)
+      .set({
+        scheduledFor: opts.scheduledFor ?? existing.scheduledFor,
+        startLocal: opts.startLocal ?? existing.startLocal,
+      })
+      .where(and(eq(wodInboxItems.id, existing.id), eq(wodInboxItems.userId, userId)))
+      .returning();
+    return toView(updated ?? existing);
+  }
   const [row] = await db
     .insert(wodInboxItems)
     .values({
@@ -79,33 +94,11 @@ export async function createInboxItem(
   return toView(row);
 }
 
-async function recordInvocation(
-  db: Db,
-  userId: string,
-  meta: AiInvocationMeta,
-  output: unknown,
-  valid: boolean,
-  error: string | null,
-): Promise<void> {
-  await db
-    .insert(aiInvocations)
-    .values({
-      userId,
-      kind: meta.kind,
-      model: meta.model,
-      promptVersion: meta.promptVersion,
-      inputHash: meta.inputHash,
-      output,
-      valid,
-      error,
-      latencyMs: meta.latencyMs,
-      tokensIn: meta.tokensIn,
-      tokensOut: meta.tokensOut,
-    })
-    .onConflictDoNothing();
-}
-
-/** Parse (AI or heuristic) + deterministic analysis. Status: parsed (≥ 0.7) or needs_review. */
+/**
+ * Parse (AI or heuristic) + deterministic analysis. Status: parsed (≥ 0.7) or needs_review. The
+ * provider call goes through `parseWodGuarded` (stored-output reuse, daily cap, audit row); a
+ * capped or failed call degrades to the heuristic parser.
+ */
 export async function parseInboxItem(
   db: Db,
   userId: string,
@@ -124,11 +117,10 @@ export async function parseInboxItem(
   let source = "HEURISTIC";
   let confidence = 0;
   try {
-    const res = await aiProvider().parseWod({ text: item.rawText });
+    const res = await parseWodGuarded(db, userId, { text: item.rawText });
     wod = res.output;
     source =
       res.meta.provider === "anthropic" && wod.parser === "AI_PARSED" ? "AI_PARSED" : "HEURISTIC";
-    await recordInvocation(db, userId, res.meta, wod, true, null);
     confidence = wod.parseConfidence;
   } catch (err) {
     log.warn("inbox.parse.failed", {
@@ -190,8 +182,8 @@ export async function confirmInboxItem(
   if (!item) throw new NotFoundError("Élément de l'inbox");
   if (item.workoutId) return { workoutId: item.workoutId };
   const wod = NormalizedWodSchema.parse(item.normalizedWod);
-  const analysis =
-    item.analysis ?? analyzeWod(wod, { e1rms: await bestE1rmsByExercise(db, userId) });
+  const e1rms = await bestE1rmsByExercise(db, userId);
+  const analysis = item.analysis ?? analyzeWod(wod, { e1rms });
   const created = await createCrossfitWorkoutFromWod(db, userId, {
     date: opts.date,
     startMinute: opts.startMinute,
@@ -199,6 +191,7 @@ export async function confirmInboxItem(
     wod,
     analysis,
     inboxItemId: item.id,
+    e1rms,
   });
   await db
     .update(wodInboxItems)

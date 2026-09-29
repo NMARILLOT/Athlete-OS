@@ -323,7 +323,12 @@ describe("cardio service", () => {
     await handle.db.insert(schema.athleteProfiles).values({ userId: USER_A, lthrManual: 170 });
 
     const first = await resolveZoneSet(handle.db, USER_A, TODAY);
-    expect(first).toMatchObject({ method: "lthr", source: "USER", confidence: "HIGH", lthr: 170 });
+    expect(first).toMatchObject({
+      method: "lthr",
+      source: "USER",
+      confidence: "MEDIUM",
+      lthr: 170,
+    });
     expect(first?.zones.map((z) => [z.minBpm, z.maxBpm])).toEqual([
       [0, 144],
       [145, 152],

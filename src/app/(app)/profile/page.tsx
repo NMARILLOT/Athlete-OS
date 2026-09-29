@@ -10,9 +10,8 @@ import { FocusCard } from "@/components/profile/focus-card";
 import { PreferencesForm } from "@/components/profile/preferences-form";
 import { PainList } from "@/components/profile/pain-list";
 import { FlagsList } from "@/components/profile/flags-list";
-import { SubmitButton } from "@/components/profile/submit-button";
 import { weightWord } from "@/components/profile/labels";
-import { signOutAction } from "./actions";
+import { SignOutButton } from "@/components/profile/sign-out-button";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Profile" };
@@ -135,11 +134,7 @@ export default async function ProfilePage() {
       <Card>
         <CardTitle>Session</CardTitle>
         {view.authMode === "supabase" ? (
-          <form action={signOutAction} className="mt-3">
-            <SubmitButton variant="outline" full size="lg" pendingLabel="Déconnexion…">
-              Se déconnecter
-            </SubmitButton>
-          </form>
+          <SignOutButton />
         ) : (
           <p className="mt-2 text-sm text-fg-muted">Mode local — pas de session.</p>
         )}

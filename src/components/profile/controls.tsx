@@ -1,5 +1,7 @@
 "use client";
 
+import { isNextRedirect } from "@/lib/next-redirect";
+
 import type { ReactNode } from "react";
 import { cn } from "@/lib/cn";
 
@@ -146,7 +148,8 @@ export function FormError({ message }: { message: string | null }) {
   );
 }
 
-export function errorMessage(err: unknown): string {
-  if (err instanceof Error && err.message && !err.message.includes("NEXT_")) return err.message;
+export function errorMessage(err: unknown): string | null {
+  if (isNextRedirect(err)) return null;
+  if (err instanceof Error && err.message) return err.message;
   return "Impossible d'enregistrer. Réessaie.";
 }

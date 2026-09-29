@@ -1,5 +1,5 @@
 import "server-only";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, lt, or } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { dailyReadiness, painLogs, userIntents } from "@/db/schema";
 import type { IntensityBand, IntentKind, PainLocation } from "@/domain/core";
@@ -97,6 +97,11 @@ export async function declareIntent(
   });
 }
 
+/**
+ * "Effacer" on Today: withdraw the active intents declared for `date`, plus any stale single-day
+ * intent (ends_on null, starts_on before `date`) so a wish tapped on a previous day can never
+ * linger in the engine input.
+ */
 export async function withdrawIntents(db: Db, userId: string, date: IsoDate): Promise<void> {
   await db
     .update(userIntents)
@@ -105,9 +110,33 @@ export async function withdrawIntents(db: Db, userId: string, date: IsoDate): Pr
       and(
         eq(userIntents.userId, userId),
         eq(userIntents.status, "active"),
-        eq(userIntents.startsOn, date),
+        or(
+          eq(userIntents.startsOn, date),
+          and(isNull(userIntents.endsOn), lt(userIntents.startsOn, date)),
+        ),
       ),
     );
+}
+
+/** Daily job: single-day intents from a past day expire (status `withdrawn`). Returns the count. */
+export async function withdrawStaleIntents(
+  db: Db,
+  userId: string,
+  today: IsoDate,
+): Promise<number> {
+  const rows = await db
+    .update(userIntents)
+    .set({ status: "withdrawn" })
+    .where(
+      and(
+        eq(userIntents.userId, userId),
+        eq(userIntents.status, "active"),
+        isNull(userIntents.endsOn),
+        lt(userIntents.startsOn, today),
+      ),
+    )
+    .returning({ id: userIntents.id });
+  return rows.length;
 }
 
 export async function logPain(

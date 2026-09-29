@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import { safeNextPath } from "@/lib/safe-next-path";
 
 /**
  * Next 16 proxy (formerly middleware): refreshes the Supabase session cookie and redirects
@@ -37,7 +38,7 @@ export async function proxy(request: NextRequest) {
   }
   if (user && path === "/login") {
     const home = request.nextUrl.clone();
-    home.pathname = "/today";
+    home.pathname = safeNextPath(request.nextUrl.searchParams.get("next"));
     home.search = "";
     return NextResponse.redirect(home);
   }

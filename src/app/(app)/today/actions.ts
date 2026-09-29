@@ -3,19 +3,34 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { getDb } from "@/db/client";
-import { INTENT_KIND_VALUES, INTENSITY_BAND_VALUES } from "@/domain/core";
+import { INTENT_KIND_VALUES, INTENSITY_BAND_VALUES, type UserIntent } from "@/domain/core";
 import type { Option, Recommendation } from "@/domain/engine";
+import { isBonusOption } from "@/domain/engine";
 import { requireUser } from "@/server/auth";
-import { acceptOption, recompute } from "@/server/services/recommendation.service";
+import { ValidationError } from "@/server/errors";
+import { AiCapExceededError, parseIntentGuarded } from "@/server/services/ai-invocations.service";
+import { logRestDay } from "@/server/services/log.service";
+import {
+  acceptOption,
+  applyReschedules,
+  getCurrentRecommendation,
+  getRecommendation,
+  recompute,
+} from "@/server/services/recommendation.service";
 import {
   declareIntent,
   declareReadiness,
   withdrawIntents,
 } from "@/server/services/readiness.service";
-import { createWorkoutFromOption } from "@/server/services/workout.service";
+import {
+  createWorkoutFromOption,
+  findOpenWorkoutForOption,
+  optionFromCatalog,
+  routeForWorkout,
+} from "@/server/services/workout.service";
 import { createStrengthWorkoutFromTemplate } from "@/server/services/strength-session.service";
 import { localDate, localMinute } from "@/server/time";
-import { aiProvider } from "@/server/providers/ai";
+import { heuristicIntent } from "@/server/providers/ai";
 import { addDays } from "@/domain/core/dates";
 
 const ReadinessInput = z.object({
@@ -64,21 +79,34 @@ export async function declareIntentAction(
   return rec.output;
 }
 
-/** Free-text wish ("J'ai envie de courir") → bounded intent via the AI provider (mock = keywords). */
+/**
+ * Free-text wish ("J'ai envie de courir") → bounded intent via the AI provider (mock = keywords).
+ * Goes through the invocation budget (reuse + daily cap + audit); over the cap, the keyword parser
+ * answers instead of the model.
+ */
 export async function declareFreeTextIntentAction(text: string): Promise<Recommendation | null> {
   const user = await requireUser();
   const clean = z.string().min(2).max(300).parse(text);
   const db = await getDb();
   const today = localDate(new Date(), user.timezone);
-  const res = await aiProvider().parseIntent({ text: clean, today, tomorrow: addDays(today, 1) });
-  const intent = res.output;
+  const tomorrow = addDays(today, 1);
+  let intent: UserIntent;
+  let parsedBy: "USER" | "AI_PARSED" = "USER";
+  try {
+    const res = await parseIntentGuarded(db, user.id, { text: clean, today, tomorrow });
+    intent = res.output;
+    parsedBy = res.meta.provider === "anthropic" ? "AI_PARSED" : "USER";
+  } catch (err) {
+    if (!(err instanceof AiCapExceededError)) throw err;
+    intent = heuristicIntent(clean, today, tomorrow);
+  }
   await declareIntent(db, user.id, {
     date: intent.date ?? today,
     kind: intent.kind,
     intensity: intent.intensity ?? null,
     availableMinutes: intent.availableMinutes ?? null,
     rawText: clean,
-    parsedBy: res.meta.provider === "anthropic" ? "AI_PARSED" : "USER",
+    parsedBy,
   });
   const rec = await recompute(db, user.id, { timezone: user.timezone, date: today });
   revalidatePath("/today");
@@ -94,56 +122,122 @@ export async function clearIntentAction(): Promise<void> {
   revalidatePath("/today");
 }
 
+const RecommendationIdInput = z.string().uuid().nullable();
+const SelectorInput = z
+  .string()
+  .max(40)
+  .regex(/^(primary|alternative:\d{1,2}|bonus)$/);
+
 export async function acceptOptionAction(
   recommendationId: string | null,
   option: string,
 ): Promise<void> {
   const user = await requireUser();
-  if (!recommendationId) return;
+  const id = RecommendationIdInput.parse(recommendationId);
+  const selector = SelectorInput.parse(option);
+  if (!id) return;
   const db = await getDb();
-  await acceptOption(db, user.id, recommendationId, z.string().max(40).parse(option));
+  await acceptOption(db, user.id, id, selector);
 }
 
-/** START: materialise the shown option as today's workout and route to the right mode. */
+/** Only the option's identity is taken from the client; its profile is resolved server-side. */
+const OptionSelectorInput = z.object({
+  kind: z.string().min(1).max(60),
+  family: z.string().min(1).max(40),
+  plannedId: z.string().uuid().optional(),
+  fixed: z.boolean().optional(),
+});
+
+/**
+ * START: open the session already planned for today when the option refers to one (a planned
+ * session is never duplicated), else materialise the option as today's workout from the stored
+ * recommendation (or the candidate catalog — never the client's numbers) and route to the mode.
+ */
 export async function startOptionAction(
   option: Option,
   recommendationId: string | null,
 ): Promise<{ href: string } | null> {
   const user = await requireUser();
+  const sel = OptionSelectorInput.parse(option);
+  const recId = RecommendationIdInput.parse(recommendationId);
   const db = await getDb();
   const now = new Date();
   const today = localDate(now, user.timezone);
-  if (option.fixed && option.plannedId) {
-    return {
-      href:
-        option.family === "crossfit"
-          ? `/workouts/${option.plannedId}`
-          : `/workouts/${option.plannedId}`,
-    };
+
+  const open = await findOpenWorkoutForOption(db, user.id, {
+    date: today,
+    kind: sel.kind,
+    plannedId: sel.plannedId ?? null,
+  });
+  if (open && open.type === "rest") {
+    // A planned rest day (calendar "Repos") is simply marked done.
+    await logRestDay(db, user.id, { date: today });
+    await recompute(db, user.id, { timezone: user.timezone, date: today });
+    revalidatePath("/today");
+    return { href: "/today" };
   }
-  if (option.family === "rest") {
+  if (open) {
+    revalidatePath("/today");
+    return { href: routeForWorkout(open) };
+  }
+  if (sel.plannedId || sel.fixed)
+    throw new ValidationError("Cette séance n'est plus prévue aujourd'hui : recharge la page.");
+
+  const rec =
+    (recId ? await getRecommendation(db, user.id, recId) : null) ??
+    (await getCurrentRecommendation(db, user.id, today));
+  const fromRec = rec
+    ? [
+        rec.output.primary,
+        ...rec.output.alternatives,
+        ...(isBonusOption(rec.output.bonus) ? [rec.output.bonus] : []),
+      ].find((o) => o.kind === sel.kind && !o.plannedId)
+    : undefined;
+  const resolved = fromRec ?? optionFromCatalog(sel.kind);
+  if (!resolved) throw new ValidationError("Option inconnue : recharge la page.");
+  const storedRecommendationId = rec?.id ?? null;
+
+  if (resolved.family === "rest") {
     await createWorkoutFromOption(db, user.id, {
-      option,
+      option: resolved,
       date: today,
       timezone: user.timezone,
-      recommendationId,
+      recommendationId: storedRecommendationId,
     });
     await recompute(db, user.id, { timezone: user.timezone, date: today });
     revalidatePath("/today");
     return { href: "/today" };
   }
   const created = await createWorkoutFromOption(db, user.id, {
-    option,
+    option: resolved,
     date: today,
     timezone: user.timezone,
-    recommendationId,
+    recommendationId: storedRecommendationId,
     startMinute: localMinute(now, user.timezone),
   });
   revalidatePath("/today");
   revalidatePath("/calendar");
-  if (created.type === "strength") return { href: `/train/strength/${created.id}` };
-  if (created.type === "cardio") return { href: `/train/cardio/${created.id}` };
-  return { href: `/workouts/${created.id}` };
+  return { href: routeForWorkout(created) };
+}
+
+/**
+ * "Appliquer" on a Today reschedule card: move the engine-suggested planned session(s) to their
+ * target date (one id, or every pending reschedule), then recompute.
+ */
+export async function applyReschedulesAction(plannedId?: string): Promise<{ applied: number }> {
+  const user = await requireUser();
+  const id = z.string().uuid().optional().parse(plannedId);
+  const db = await getDb();
+  const today = localDate(new Date(), user.timezone);
+  const { applied } = await applyReschedules(db, user.id, {
+    timezone: user.timezone,
+    today,
+    plannedIds: id ? [id] : undefined,
+  });
+  if (applied.length) await recompute(db, user.id, { timezone: user.timezone, date: today });
+  revalidatePath("/today");
+  revalidatePath("/calendar");
+  return { applied: applied.length };
 }
 
 export async function startTemplateAction(templateId: string): Promise<{ href: string }> {

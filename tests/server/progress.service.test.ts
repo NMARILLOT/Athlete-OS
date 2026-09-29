@@ -282,34 +282,94 @@ beforeAll(async () => {
       superseded: true,
     },
   ]);
-  await handle.db.insert(schema.activities).values([
+  const [flatRun] = await handle.db
+    .insert(schema.activities)
+    .values([
+      {
+        userId: USER_A,
+        provider: "fit_import",
+        fingerprint: "running|1",
+        sport: "running",
+        startAt: new Date(`${d(-5)}T07:00:00Z`),
+        localDate: d(-5),
+        durationSec: 2700,
+        distanceM: 8000,
+        avgHr: 143,
+        avgPaceSecKm: 337.5,
+        parserVersion: "fit_v1",
+        comparableGroup: "easy_run_flat_45_75min",
+      },
+      {
+        userId: USER_A,
+        provider: "fit_import",
+        fingerprint: "running|2",
+        sport: "running",
+        startAt: new Date(`${d(-12)}T07:00:00Z`),
+        localDate: d(-12),
+        durationSec: 2400,
+        distanceM: 8000,
+        avgHr: 171,
+        avgPaceSecKm: 300,
+        parserVersion: "fit_v1",
+        comparableGroup: "hard_run_flat_under45min",
+      },
+      // A hilly long run: another easy_run group, never merged with the flat 45–75 min one (§30).
+      {
+        userId: USER_A,
+        provider: "fit_import",
+        fingerprint: "running|3",
+        sport: "running",
+        startAt: new Date(`${d(-8)}T08:00:00Z`),
+        localDate: d(-8),
+        durationSec: 5400,
+        distanceM: 14000,
+        avgHr: 147,
+        avgPaceSecKm: 385,
+        parserVersion: "fit_v1",
+        comparableGroup: "easy_run_hilly_75_120min",
+      },
+      // No comparable group (unknown conditions) → not "comparable", not plotted.
+      {
+        userId: USER_A,
+        provider: "fit_import",
+        fingerprint: "running|4",
+        sport: "running",
+        startAt: new Date(`${d(-9)}T08:00:00Z`),
+        localDate: d(-9),
+        durationSec: 3000,
+        distanceM: 9000,
+        avgHr: 144,
+        avgPaceSecKm: 333,
+        parserVersion: "fit_v1",
+        comparableGroup: null,
+      },
+    ])
+    .returning({ id: schema.activities.id });
+  if (!flatRun) throw new Error("activities insert failed");
+  // The versioned pace @ HR metric exists for the flat run: preferred over the activity average.
+  await handle.db.insert(schema.computedMetrics).values([
     {
       userId: USER_A,
-      provider: "fit_import",
-      fingerprint: "running|1",
-      sport: "running",
-      startAt: new Date(`${d(-5)}T07:00:00Z`),
-      localDate: d(-5),
-      durationSec: 2700,
-      distanceM: 8000,
-      avgHr: 143,
-      avgPaceSecKm: 337.5,
-      parserVersion: "fit_v1",
-      comparableGroup: "easy_run_flat_45_75min",
+      metric: "pace_at_hr",
+      scope: "activity",
+      scopeId: flatRun.id,
+      date: d(-5),
+      value: 330,
+      unit: "s/km",
+      algorithmVersion: "pace_at_hr_v1",
+      inputs: { zone: 2, hrMin: 145, hrMax: 152, avgHr: 148.2, sampleCount: 400 },
     },
     {
       userId: USER_A,
-      provider: "fit_import",
-      fingerprint: "running|2",
-      sport: "running",
-      startAt: new Date(`${d(-12)}T07:00:00Z`),
-      localDate: d(-12),
-      durationSec: 2400,
-      distanceM: 8000,
-      avgHr: 171,
-      avgPaceSecKm: 300,
-      parserVersion: "fit_v1",
-      comparableGroup: "hard_run_flat_under45min",
+      metric: "pace_at_hr",
+      scope: "activity",
+      scopeId: flatRun.id,
+      date: d(-5),
+      value: 999,
+      unit: "s/km",
+      algorithmVersion: "pace_at_hr_v0",
+      inputs: {},
+      superseded: true,
     },
   ]);
   await handle.db.insert(schema.recoveryMetrics).values([
@@ -511,8 +571,26 @@ describe("getProgressView", () => {
 
   it("fills the aerobic engine from comparable easy runs, threshold metrics and tests", async () => {
     const view = await getProgressView(handle.db, USER_A, "4w", TODAY, { timezone: TZ });
+    // One series per comparable group, never merged; the hard run and the group-less run are out.
     expect(view.engine.paceAtHr).toEqual([
-      { date: addDays(TODAY, -5), paceSecKm: 338, hrBand: "140–149" },
+      {
+        comparableGroup: "easy_run_flat_45_75min",
+        points: [
+          // Current `pace_at_hr` metric preferred (the superseded v0 row is ignored).
+          { date: addDays(TODAY, -5), paceSecKm: 330, hrBand: "145–152", basis: "pace_at_hr" },
+        ],
+      },
+      {
+        comparableGroup: "easy_run_hilly_75_120min",
+        points: [
+          {
+            date: addDays(TODAY, -8),
+            paceSecKm: 385,
+            hrBand: "140–149",
+            basis: "activity_average",
+          },
+        ],
+      },
     ]);
     // Current computed metric + the 5 km test converted with the documented factor (300 × 1.05).
     expect(view.engine.thresholdPace).toEqual([

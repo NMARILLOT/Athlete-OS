@@ -152,7 +152,8 @@ export function zonesFromLthr(lthr: number, validFrom: IsoDate, source: DataSour
       HR_ZONE_CEILING_BPM,
     ),
     source,
-    confidence: "HIGH",
+    // Zones from a measured/estimated device LTHR are trusted; a hand-typed value is declared data (spec §70).
+    confidence: source === "GARMIN" || source === "DEVICE" ? "HIGH" : "MEDIUM",
   };
 }
 

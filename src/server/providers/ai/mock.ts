@@ -1,7 +1,13 @@
 import "server-only";
 import { parseWodText, HEURISTIC_PARSER_VERSION, type NormalizedWod } from "@/domain/wod";
 import { type UserIntent, INTENT_KIND_VALUES } from "@/domain/core";
-import { hashInput, type AiProvider, type AiResult, type ExplainInput } from "./types";
+import {
+  hashInput,
+  type AiCallKey,
+  type AiProvider,
+  type AiResult,
+  type ExplainInput,
+} from "./types";
 
 /**
  * Mock provider: the deterministic heuristic parser + keyword intent parser + templated explanation.
@@ -10,16 +16,31 @@ import { hashInput, type AiProvider, type AiResult, type ExplainInput } from "./
 export class MockAiProvider implements AiProvider {
   readonly name = "mock" as const;
 
+  parseWodKey(input: { text: string }): AiCallKey {
+    return {
+      kind: "parse_wod",
+      model: "heuristic",
+      promptVersion: HEURISTIC_PARSER_VERSION,
+      inputHash: hashInput({ text: input.text }),
+    };
+  }
+
+  parseIntentKey(input: { text: string; today: string }): AiCallKey {
+    return {
+      kind: "parse_intent",
+      model: "heuristic",
+      promptVersion: "intent_keywords_v1",
+      inputHash: hashInput({ text: input.text, today: input.today }),
+    };
+  }
+
   async parseWod(input: { text: string }): Promise<AiResult<NormalizedWod>> {
     const start = Date.now();
     const output = parseWodText(input.text);
     return {
       output,
       meta: {
-        kind: "parse_wod",
-        model: "heuristic",
-        promptVersion: HEURISTIC_PARSER_VERSION,
-        inputHash: hashInput({ text: input.text }),
+        ...this.parseWodKey(input),
         latencyMs: Date.now() - start,
         tokensIn: 0,
         tokensOut: 0,
@@ -38,10 +59,7 @@ export class MockAiProvider implements AiProvider {
     return {
       output,
       meta: {
-        kind: "parse_intent",
-        model: "heuristic",
-        promptVersion: "intent_keywords_v1",
-        inputHash: hashInput({ text: input.text }),
+        ...this.parseIntentKey(input),
         latencyMs: Date.now() - start,
         tokensIn: 0,
         tokensOut: 0,
