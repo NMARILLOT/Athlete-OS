@@ -16,12 +16,14 @@ PGlite in dev/tests) · Supabase Auth · Zod · Anthropic SDK (Layer B, optional
 ```bash
 cp .env.example .env.local        # defaults: AUTH_MODE=local, AI_PROVIDER=mock, GARMIN_PROVIDER=mock, PGlite database
 npm install
-npm run db:migrate                # applies drizzle/ migrations to ./.pglite (no DATABASE_URL needed locally)
-npm run db:seed                   # exercise catalog, benchmarks, templates
+npm run db:seed                   # creates ./.pglite, applies drizzle/ migrations, seeds the catalog, benchmarks, templates
 npm run dev
 ```
 
-Open http://localhost:3000. In local mode there is a single user and no login.
+Open http://localhost:3000. In local mode there is a single user and no login; the first visit runs the
+five-step onboarding. `npm run db:migrate` is for Postgres only (it needs `DIRECT_DATABASE_URL`); the embedded PGlite
+database is migrated automatically when the app or the seed opens it. Set `FLAG_GARMIN=true` in `.env.local` to try the
+mock Garmin sync from *Activités*.
 
 ## Checks
 
@@ -37,7 +39,8 @@ src/domain/     pure TypeScript: vocabulary, exercises, stimulus ledger, load mo
 src/db/         Drizzle schema (RLS on every table), client (postgres.js | PGlite), migrations, seed, scoped repository
 src/server/     env (fails closed), auth, providers (Garmin mock/official stub, AI anthropic/mock, body-comp, calendar),
                 FIT parser, services, jobs
-src/app/        routes (Today, Calendar, Train, Progress, Profile, Inbox, API)
+src/app/        routes: /today, /calendar, /train (+ strength & cardio modes), /inbox, /workouts/[id], /log/*, /activities,
+                /exercises/[id], /progress, /profile/*, /onboarding/[step], API (sync, FIT import, cron, health)
 src/components/ UI primitives and feature components · src/stores/ offline-first strength session store
 ```
 

@@ -8,7 +8,7 @@ export const metadata: Metadata = {
   applicationName: "Athlete OS",
   appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Athlete OS" },
   formatDetection: { telephone: false },
-  icons: { apple: "/icons/icon-192.png" },
+  icons: { icon: "/icons/icon-192.png", apple: "/icons/icon-192.png" },
 };
 
 export const viewport: Viewport = {
