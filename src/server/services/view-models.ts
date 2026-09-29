@@ -44,6 +44,7 @@ export interface TodayView {
   activeIntentKind: string | null;
   /** In-progress strength workout (from the server replica) so Today can offer "Reprendre". */
   inProgressWorkoutId: string | null;
+  inProgressWorkoutType: "strength" | "cardio" | null;
   insight: string | null;
   onboardingDone: boolean;
 }

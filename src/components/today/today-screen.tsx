@@ -108,7 +108,11 @@ export function TodayScreen({ view, actions }: { view: TodayView; actions: Actio
 
       {view.inProgressWorkoutId ? (
         <Link
-          href={`/train/strength/${view.inProgressWorkoutId}`}
+          href={
+            view.inProgressWorkoutType === "cardio"
+              ? `/train/cardio/${view.inProgressWorkoutId}`
+              : `/train/strength/${view.inProgressWorkoutId}`
+          }
           className="flex items-center justify-between rounded-2xl bg-strength/15 px-4 py-3 font-semibold text-strength"
         >
           Reprendre la séance en cours <span aria-hidden>→</span>

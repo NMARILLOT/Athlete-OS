@@ -43,6 +43,7 @@ const ENTRIES = [
   { href: "/log/rest", label: "Jour de repos", icon: Moon, tone: "text-recovery" },
   { href: "/log/pain", label: "Signaler une douleur", icon: HeartPulse, tone: "text-danger" },
   { href: "/log/body", label: "Mesure corporelle", icon: Scale, tone: "text-info" },
+  { href: "/activities", label: "Mes activités", icon: Activity, tone: "text-cardio-easy" },
   {
     href: "/activities/import",
     label: "Importer un fichier FIT",

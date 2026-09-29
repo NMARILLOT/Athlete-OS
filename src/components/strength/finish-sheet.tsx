@@ -16,6 +16,7 @@ export function FinishSheet({
   onClose,
   onFinish,
   title = "Comment c'était ?",
+  initial,
 }: {
   onClose: () => void;
   onFinish: (f: {
@@ -25,10 +26,12 @@ export function FinishSheet({
     notes: string;
   }) => Promise<void> | void;
   title?: string;
+  /** Prefill when editing an existing feedback ("Modifier le ressenti"). */
+  initial?: { rpe: number | null; feeling: Feeling | null; painReported: boolean } | null;
 }) {
-  const [feeling, setFeeling] = useState<Feeling | null>(null);
-  const [rpe, setRpe] = useState<number>(7);
-  const [pain, setPain] = useState(false);
+  const [feeling, setFeeling] = useState<Feeling | null>(initial?.feeling ?? null);
+  const [rpe, setRpe] = useState<number>(initial?.rpe ?? 7);
+  const [pain, setPain] = useState(initial?.painReported ?? false);
   const [busy, setBusy] = useState(false);
   return (
     <div

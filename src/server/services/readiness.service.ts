@@ -81,22 +81,20 @@ export async function declareIntent(
         eq(userIntents.startsOn, input.date),
       ),
     );
-  await db
-    .insert(userIntents)
-    .values({
-      userId,
-      startsOn: input.date,
-      endsOn: input.endsOn ?? null,
-      kind: input.kind,
-      params: {
-        intensity: input.intensity ?? undefined,
-        availableMinutes: input.availableMinutes ?? undefined,
-      },
-      rawText: input.rawText ?? null,
-      parsedBy: input.parsedBy ?? "USER",
-      confidence: input.confidence ?? null,
-      status: "active",
-    });
+  await db.insert(userIntents).values({
+    userId,
+    startsOn: input.date,
+    endsOn: input.endsOn ?? null,
+    kind: input.kind,
+    params: {
+      intensity: input.intensity ?? undefined,
+      availableMinutes: input.availableMinutes ?? undefined,
+    },
+    rawText: input.rawText ?? null,
+    parsedBy: input.parsedBy ?? "USER",
+    confidence: input.confidence ?? null,
+    status: "active",
+  });
 }
 
 export async function withdrawIntents(db: Db, userId: string, date: IsoDate): Promise<void> {

@@ -1,10 +1,11 @@
 import "server-only";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray } from "drizzle-orm";
 import type { Db } from "@/db/client";
 import { dailyReadiness, userIntents, users, athleteProfiles, workouts } from "@/db/schema";
 import { addDays } from "@/domain/core/dates";
 import type { CurrentUser } from "@/server/auth/types";
 import { localDate, localMinute } from "@/server/time";
+import { familyOf, kindOf } from "./engine-input";
 import { ensureTodayRecommendation } from "./recommendation.service";
 import type { TodayView, WorkoutCard } from "./view-models";
 
@@ -15,8 +16,8 @@ export function toWorkoutCard(w: typeof workouts.$inferSelect, timezone: string)
     type: w.type,
     status: w.status,
     title: w.title,
-    kind: null,
-    family: null,
+    kind: kindOf(w),
+    family: familyOf(w),
     startMinute: w.startAt ? localMinute(w.startAt, timezone) : null,
     durationMin: w.actualDurationMin ?? w.plannedDurationMin,
     intensity: w.realisedIntensity ?? w.plannedIntensity,
@@ -58,16 +59,17 @@ export async function getTodayView(
     .orderBy(desc(userIntents.declaredAt))
     .limit(1);
   const [inProgress] = await db
-    .select({ id: workouts.id })
+    .select({ id: workouts.id, type: workouts.type })
     .from(workouts)
     .where(
       and(
         eq(workouts.userId, user.id),
         eq(workouts.status, "in_progress"),
-        eq(workouts.type, "strength"),
+        inArray(workouts.type, ["strength", "cardio"]),
         gte(workouts.date, addDays(today, -1)),
       ),
     )
+    .orderBy(desc(workouts.startAt))
     .limit(1);
   const [profile] = await db
     .select({ baselinePhaseUntil: athleteProfiles.baselinePhaseUntil })
@@ -103,6 +105,8 @@ export async function getTodayView(
         : null,
     activeIntentKind: intent?.kind ?? null,
     inProgressWorkoutId: inProgress?.id ?? null,
+    inProgressWorkoutType:
+      inProgress?.type === "cardio" ? "cardio" : inProgress ? "strength" : null,
     insight,
     onboardingDone: Boolean(u?.onboardingCompletedAt),
   };

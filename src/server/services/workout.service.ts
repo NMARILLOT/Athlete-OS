@@ -115,19 +115,17 @@ export async function createWorkoutFromOption(
       (o.templateId ? STRENGTH_TEMPLATES.find((t) => t.id === o.templateId) : undefined) ??
       STRENGTH_TEMPLATES.find((t) => t.kind === o.kind);
     if (template) {
-      await db
-        .insert(workoutExercises)
-        .values(
-          template.exercises.map((ex, i) => ({
-            userId,
-            workoutId: w.id,
-            date: opts.date,
-            order: i,
-            exerciseId: ex.exerciseId,
-            prescription: ex.prescription,
-            source: "ENGINE",
-          })),
-        );
+      await db.insert(workoutExercises).values(
+        template.exercises.map((ex, i) => ({
+          userId,
+          workoutId: w.id,
+          date: opts.date,
+          order: i,
+          exerciseId: ex.exerciseId,
+          prescription: ex.prescription,
+          source: "ENGINE",
+        })),
+      );
     }
   }
   return { id: w.id, type };
@@ -167,15 +165,13 @@ export async function createCrossfitWorkoutFromWod(
     })
     .returning({ id: workouts.id });
   if (!w) throw new Error("workout insert failed");
-  await db
-    .insert(crossfitWorkouts)
-    .values({
-      userId,
-      workoutId: w.id,
-      wodInboxItemId: opts.inboxItemId,
-      normalizedWod: opts.wod,
-      timeDomain: a.timeDomain,
-    });
+  await db.insert(crossfitWorkouts).values({
+    userId,
+    workoutId: w.id,
+    wodInboxItemId: opts.inboxItemId,
+    normalizedWod: opts.wod,
+    timeDomain: a.timeDomain,
+  });
   await db.insert(workoutAnalyses).values({
     userId,
     workoutId: w.id,
@@ -239,6 +235,7 @@ export async function completeWorkout(
     score?: {
       kind: "time" | "rounds_reps" | "reps" | "load";
       value: number;
+      extraReps?: number | null;
       rx: boolean;
       scaledNotes?: string;
     } | null;
@@ -273,6 +270,7 @@ export async function completeWorkout(
         score: {
           kind: opts.score.kind,
           value: opts.score.value,
+          extraReps: opts.score.kind === "rounds_reps" ? (opts.score.extraReps ?? null) : null,
           rx: opts.score.rx,
           scaledNotes: opts.score.scaledNotes ?? "",
         },
@@ -416,21 +414,19 @@ export async function logQuickWorkout(
       actualMin: opts.durationMin,
       plannedMin: catalog.durationMin,
     });
-    await db
-      .insert(workoutAnalyses)
-      .values({
-        userId,
-        workoutId: w.id,
-        phase: "actual",
-        date: opts.date,
-        ...analysisRowFromProfile(
-          { ...profile, loadVector: scaled.loadVector },
-          "CALCULATED",
-          `candidate_catalog_v1+${ACTUAL_SCALING_VERSION}`,
-          opts.rpe ? 0.8 : 0.5,
-          opts.kind ?? null,
-        ),
-      });
+    await db.insert(workoutAnalyses).values({
+      userId,
+      workoutId: w.id,
+      phase: "actual",
+      date: opts.date,
+      ...analysisRowFromProfile(
+        { ...profile, loadVector: scaled.loadVector },
+        "CALCULATED",
+        `candidate_catalog_v1+${ACTUAL_SCALING_VERSION}`,
+        opts.rpe ? 0.8 : 0.5,
+        opts.kind ?? null,
+      ),
+    });
   }
   return { id: w.id, type: opts.type };
 }

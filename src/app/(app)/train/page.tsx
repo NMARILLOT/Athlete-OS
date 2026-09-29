@@ -1,11 +1,17 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { getCurrentUser } from "@/server/auth";
 import { STRENGTH_TEMPLATES } from "@/domain/strength";
 import { Card, CardTitle } from "@/components/ui/card";
 import { StartTemplateButton } from "@/components/strength/start-template-button";
 
 export const metadata = { title: "Train" };
+export const dynamic = "force-dynamic";
 
-export default function TrainPage() {
+export default async function TrainPage() {
+  const user = await getCurrentUser();
+  if (!user) redirect("/login?next=/train");
+  if (!user.onboardingCompletedAt) redirect("/onboarding/1");
   return (
     <section className="flex flex-col gap-4 py-6">
       <h1 className="text-3xl font-semibold tracking-tight">Train</h1>

@@ -36,7 +36,7 @@ import { crossfitClassPrior } from "@/domain/engine";
 import { sessionRpeLoad } from "@/domain/load";
 import { localIso, localMinute } from "@/server/time";
 
-const DEFAULT_GOALS: GoalWeights = {
+export const DEFAULT_GOALS: GoalWeights = {
   health_longevity: 1,
   crossfit: 0.9,
   endurance: 0.9,
@@ -467,7 +467,7 @@ function bandFromDeclared(
   return "ok";
 }
 
-function modalityOfType(type: string): LoadProfile["modality"] {
+export function modalityOfType(type: string): LoadProfile["modality"] {
   switch (type) {
     case "crossfit":
       return "mixed_modal";
@@ -483,7 +483,7 @@ function modalityOfType(type: string): LoadProfile["modality"] {
 }
 
 /** Workout kind/family are stored in notes-free columns: derive from template key or type. */
-function kindOf(w: { type: string; title: string; templateId: string | null }): string {
+export function kindOf(w: { type: string; title: string }): string {
   if (w.type === "crossfit") return "crossfit";
   const t = w.title.toLowerCase();
   if (w.type === "strength")
@@ -513,7 +513,7 @@ function kindOf(w: { type: string; title: string; templateId: string | null }): 
   return w.type;
 }
 
-function familyOf(w: { type: string; title: string; templateId: string | null }): string {
+export function familyOf(w: { type: string; title: string }): string {
   const k = kindOf(w);
   if (k === "crossfit") return "crossfit";
   if (k.startsWith("strength_")) return k;
